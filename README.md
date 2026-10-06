@@ -21,7 +21,7 @@ Today it is driven by mouse and touch; the camera hand-tracker will feed the sam
 
 One-time setup (Python venv, MediaPipe, models):
 ```powershell
-powershell -ExecutionPolicy Bypass -File tools	racker\setup.ps1
+powershell -ExecutionPolicy Bypass -File tools\tracker\setup.ps1
 ```
 After that HoloOS starts the tracker automatically. Open **HANDS** on the home screen (or press
 `C`) to calibrate: the camera finds your shoulders, you raise an open hand, then pinch at five
