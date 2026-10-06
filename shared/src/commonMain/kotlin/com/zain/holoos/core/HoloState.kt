@@ -191,7 +191,7 @@ class HoloOsState(private val scope: CoroutineScope) {
         if (com.zain.holoos.core.trackingEnabled()) com.zain.holoos.tracking.startTracker() else null
     val gestures: com.zain.holoos.tracking.GestureEngine? = tracker?.let { com.zain.holoos.tracking.GestureEngine(HandSink()) }
     val calibration: com.zain.holoos.tracking.CalibrationSession? = gestures?.let {
-        com.zain.holoos.tracking.CalibrationSession(it, onSample = { sfx(Sfx.Lock) }, onDone = { sfx(Sfx.Notify) })
+        com.zain.holoos.tracking.CalibrationSession(it, onSample = { sfx(Sfx.Lock) }, onDone = { sfx(Sfx.Notify) }, onReject = { sfx(Sfx.Denied) })
     }
     var trackerStatus by mutableStateOf(com.zain.holoos.tracking.TrackerStatus.Off)
         private set
@@ -302,6 +302,7 @@ class HoloOsState(private val scope: CoroutineScope) {
         predictor.enabled = predictionOn
         tracker?.let { tr ->
             val wall = com.zain.holoos.geo.epochMillis()
+            gestures?.setSource(tr.source)
             gestures?.process(tr.latest, wall, size.width, size.height)
             calibration?.tick(wall, size.width, size.height)
             if (trackerStatus != tr.status) trackerStatus = tr.status

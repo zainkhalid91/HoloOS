@@ -79,12 +79,19 @@ fun HandsSetupView() {
                 Step.NoTracker -> "TRACKER NOT RUNNING" to "Run tools\\tracker\\setup.ps1 once, then restart HoloOS.\nThe camera starts automatically after that."
                 Step.FindUser -> "LOCATING OPERATOR" to "Sit or stand where you normally will, about an arm and a half from the camera.\nYour shoulders anchor the control zone. Only a skeleton is used: no face, no video."
                 Step.RaiseHand -> "RAISE AN OPEN HAND" to "Hold your palm toward the camera, fingers spread, until the ring fills."
-                Step.Targets -> "REACH TARGET ${session.index + 1} OF ${session.targets.size}" to "Move your hand to where feels natural for the amber target, then pinch.\nDon't stretch: pick a position you could hold all day."
+                Step.Targets -> "REACH TARGET ${session.index + 1} OF ${session.targets.size}" to "Move your hand toward the amber target, hold it still for a moment, then pinch.\nReach clearly toward each corner, but stay relaxed."
                 Step.Done -> "CALIBRATED" to "Average fit error ${session.errorPx.toInt()} px. Your whole screen now sits inside your relaxed reach."
             }
             BasicText(title, style = holoText(28.sp, if (session.step == Step.Done) HoloColors.Amber else HoloColors.Cyan, glow = 18f, spacing = 5.sp))
             Spacer(Modifier.height(8.dp))
             BasicText(body, style = holoText(12.sp, HoloColors.Text, glow = 0f, spacing = 1.sp).copy(textAlign = TextAlign.Center))
+            if (session.hint.isNotEmpty()) {
+                BasicText(session.hint.uppercase(), style = holoText(12.sp, HoloColors.Alert, spacing = 1.sp).copy(textAlign = TextAlign.Center), modifier = Modifier.padding(top = 8.dp))
+            }
+            BasicText(
+                "CAMERA: ${holo.tracker?.source ?: "-"} · ${if (holo.gestures?.calibration != null) "CALIBRATED" else "DEFAULT MAP"}",
+                style = holoText(9.sp, HoloColors.Muted, glow = 0f, spacing = 2.sp), modifier = Modifier.padding(top = 6.dp),
+            )
             Spacer(Modifier.height(18.dp))
 
             Box(contentAlignment = Alignment.Center) {
@@ -103,6 +110,7 @@ fun HandsSetupView() {
                 Spacer(Modifier.height(16.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     SetupButton("cal-redo", "RECALIBRATE") { session.restart(epochMillis()) }
+                    SetupButton("cal-reset", "USE DEFAULT") { session.reset() }
                     if (session.step == Step.Done) SetupButton("cal-done", "DONE ►", amber = true) { holo.navigator.back() }
                 }
             }

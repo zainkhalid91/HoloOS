@@ -57,37 +57,42 @@ class Calibration(val bodySpace: Boolean, val m: FloatArray) {
             Calibration(kind == "body", nums.split(",").map { it.toFloat() }.toFloatArray().also { require(it.size == 6) })
         }.getOrNull()
 
-        /** Least squares affine fit from (bx, by) to (sx, sy). Returns the transform and its RMS error. */
-        fun fit(bodySpace: Boolean, samples: List<FloatArray>): Pair<Calibration, Float>? {
-            if (samples.size < 3) return null
-            val ata = Array(3) { DoubleArray(3) }
-            val atx = DoubleArray(3); val aty = DoubleArray(3)
-            for (s in samples) {
-                val row = doubleArrayOf(s[0].toDouble(), s[1].toDouble(), 1.0)
-                for (i in 0..2) { for (j in 0..2) ata[i][j] += row[i] * row[j]; atx[i] += row[i] * s[2]; aty[i] += row[i] * s[3] }
-            }
-            val px = solve3(ata, atx) ?: return null
-            val py = solve3(ata, aty) ?: return null
-            val cal = Calibration(bodySpace, floatArrayOf(px[0].toFloat(), px[1].toFloat(), px[2].toFloat(), py[0].toFloat(), py[1].toFloat(), py[2].toFloat()))
-            var err = 0f
-            for (s in samples) { val p = cal.apply(s[0], s[1]); err += (p.x - s[2]) * (p.x - s[2]) + (p.y - s[3]) * (p.y - s[3]) }
-            return cal to kotlin.math.sqrt(err / samples.size)
-        }
+        sealed interface FitResult
+        class Fitted(val calibration: Calibration, val rmsError: Float) : FitResult
+        class Rejected(val reason: String) : FitResult
 
-        private fun solve3(a0: Array<DoubleArray>, b0: DoubleArray): DoubleArray? {
-            val a = Array(3) { a0[it].copyOf() }; val b = b0.copyOf()
-            for (c in 0..2) {
-                var p = c
-                for (r in c + 1..2) if (abs(a[r][c]) > abs(a[p][c])) p = r
-                if (abs(a[p][c]) < 1e-12) return null
-                val t = a[c]; a[c] = a[p]; a[p] = t; val tb = b[c]; b[c] = b[p]; b[p] = tb
-                for (r in 0..2) if (r != c) {
-                    val f = a[r][c] / a[c][c]
-                    for (k in c..2) a[r][k] -= f * a[c][k]
-                    b[r] -= f * b[c]
-                }
+        /**
+         * Fits each screen axis independently: sx = a·bx + c, sy = e·by + f.
+         * A camera facing the user needs no rotation or shear, and allowing them lets a
+         * few noisy points produce a twisted, mirrored map, so the model is deliberately
+         * this small. The result is validated before it can be used.
+         */
+        fun fit(bodySpace: Boolean, samples: List<FloatArray>): FitResult {
+            if (samples.size < 3) return Rejected("Not enough targets")
+            fun line(xs: List<Float>, ys: List<Float>): Pair<Float, Float>? {
+                val mx = xs.average().toFloat(); val my = ys.average().toFloat()
+                var num = 0f; var den = 0f
+                for (i in xs.indices) { num += (xs[i] - mx) * (ys[i] - my); den += (xs[i] - mx) * (xs[i] - mx) }
+                if (den < 1e-9f) return null
+                val slope = num / den
+                return slope to (my - slope * mx)
             }
-            return DoubleArray(3) { b[it] / a[it][it] }
+            val (ax, cx) = line(samples.map { it[0] }, samples.map { it[2] }) ?: return Rejected("Your hand barely moved left to right")
+            val (ey, fy) = line(samples.map { it[1] }, samples.map { it[3] }) ?: return Rejected("Your hand barely moved up and down")
+            if (ax <= 0f) return Rejected("Left and right came out reversed")
+            if (ey <= 0f) return Rejected("Up and down came out reversed")
+            // Span of hand movement needed to cross the screen, in reference units.
+            val spanX = 1f / ax; val spanY = 1f / ey
+            val tooSmall = if (bodySpace) 0.35f else 0.08f
+            val tooLarge = if (bodySpace) 6f else 1.4f
+            if (spanX < tooSmall || spanY < tooSmall) return Rejected("Targets were too close together: reach further toward each one")
+            if (spanX > tooLarge || spanY > tooLarge) return Rejected("Movement was too large or tracking jumped")
+            val cal = Calibration(bodySpace, floatArrayOf(ax, 0f, cx, 0f, ey, fy))
+            var err = 0f
+            for (smp in samples) { val q = cal.apply(smp[0], smp[1]); err += (q.x - smp[2]) * (q.x - smp[2]) + (q.y - smp[3]) * (q.y - smp[3]) }
+            val rms = kotlin.math.sqrt(err / samples.size)
+            if (rms > 0.12f) return Rejected("Targets didn't line up (error ${(rms * 100).toInt()}% of screen)")
+            return Fitted(cal, rms)
         }
     }
 }
@@ -117,8 +122,17 @@ class HandView {
 }
 
 class GestureEngine(private val sink: GestureSink) {
-    var calibration: Calibration? = Calibration.parse(loadSetting("calibration"))
+    /** Calibration is per camera: the phone and the webcam see you from different places. */
+    var sourceKey = "WEBCAM"
         private set
+    var calibration: Calibration? = Calibration.parse(loadSetting("calibration-WEBCAM"))
+        private set
+
+    fun setSource(key: String) {
+        if (key == sourceKey) return
+        sourceKey = key
+        calibration = Calibration.parse(loadSetting("calibration-$key"))
+    }
 
     // ---- state the HUD reads (snapshot state; changes only on gesture changes)
     var active by mutableStateOf<Set<Gesture>>(emptySet())
@@ -144,6 +158,8 @@ class GestureEngine(private val sink: GestureSink) {
     private var lastSeenHandsMs = 0L
     private var shoulderMidX = 0f; private var shoulderMidY = 0f; private var shoulderW = 0f
     private var shoulderSeenMs = 0L
+    /** Once the shoulders have been seen, mapping stays body-relative for the session. */
+    private var hasBodyReference = false
     private val fx = OneEuro(1.4f, 0.006f); private val fy = OneEuro(1.4f, 0.006f)
     private var lastCursorT = 0L
     private var lastCx = 0f; private var lastCy = 0f
@@ -161,8 +177,11 @@ class GestureEngine(private val sink: GestureSink) {
     var lastAnchorB = FloatArray(2); private set
     var lastAnchorBodySpace = false; private set
 
+    private var frameNowMs = 0L
+
     fun process(f: TrackFrame?, nowMs: Long, screenW: Float, screenH: Float) {
         if (f == null || screenW <= 0f) return
+        frameNowMs = nowMs
         if (nowMs - f.receivedMs > 400 || f.hands.isEmpty()) {
             if (lastSeenHandsMs != 0L && nowMs - lastSeenHandsMs > 250) handsLost()
             if (f.id != lastFrame) { lastFrame = f.id; updateBody(f, nowMs) }
@@ -281,8 +300,11 @@ class GestureEngine(private val sink: GestureSink) {
             val a = f.aspect
             val mx = (s[0] + s[2]) / 2 * a; val my = (s[1] + s[3]) / 2
             val w = hypot((s[0] - s[2]) * a, s[1] - s[3])
-            if (w > 0.03f) {
-                val k = if (shoulderW == 0f) 1f else 0.25f
+            // The reference moves slowly and ignores implausible jumps (a misdetection),
+            // so the cursor never jumps because of the body model.
+            val plausible = shoulderW == 0f || abs(w - shoulderW) / shoulderW < 0.3f
+            if (w > 0.03f && plausible) {
+                val k = if (shoulderW == 0f) 1f else 0.08f
                 shoulderMidX += (mx - shoulderMidX) * k; shoulderMidY += (my - shoulderMidY) * k; shoulderW += (w - shoulderW) * k
                 shoulderSeenMs = nowMs
             }
@@ -290,6 +312,7 @@ class GestureEngine(private val sink: GestureSink) {
         }
         bodyVisible = nowMs - shoulderSeenMs < 1000 && shoulderW > 0f
         if (!bodyVisible) shoulderRaw = null
+        hasBodyReference = shoulderW > 0f
     }
 
     private fun analyse(h: TrackedHand, out: HandView, sw: Float, sh: Float) {
@@ -335,14 +358,13 @@ class GestureEngine(private val sink: GestureSink) {
 
     private fun mapToScreen(ax: Float, ay: Float, primary: Boolean): Offset {
         val cal = calibration
-        val body = bodyVisible
         val bx: Float; val by: Float; val bodySpace: Boolean
-        if (body && (cal == null || cal.bodySpace)) {
+        if (hasBodyReference && (cal == null || cal.bodySpace)) {
             bx = (ax - shoulderMidX) / shoulderW; by = (ay - shoulderMidY) / shoulderW; bodySpace = true
         } else {
             bx = ax; by = ay; bodySpace = false
         }
-        if (primary) { lastAnchorB[0] = bx; lastAnchorB[1] = by; lastAnchorBodySpace = bodySpace }
+        if (primary) { lastAnchorB[0] = bx; lastAnchorB[1] = by; lastAnchorBodySpace = bodySpace; remember(bx, by, frameNowMs) }
         val p = when {
             cal != null && cal.bodySpace == bodySpace -> cal.apply(bx, by)
             bodySpace -> Offset(0.5f + (bx - 0.35f) / 2.6f, (by + 1.25f) / 1.9f)
@@ -351,6 +373,39 @@ class GestureEngine(private val sink: GestureSink) {
         return Offset(p.x.coerceIn(-0.05f, 1.05f), p.y.coerceIn(-0.05f, 1.05f))
     }
 
-    fun applyCalibration(c: Calibration) { calibration = c; saveSetting("calibration", c.serialize()) }
-    fun clearCalibration() { calibration = null; saveSetting("calibration", "") }
+    fun applyCalibration(c: Calibration) { calibration = c; saveSetting("calibration-$sourceKey", c.serialize()) }
+    fun clearCalibration() { calibration = null; saveSetting("calibration-$sourceKey", "") }
+
+    // ---- anchor history, so calibration records where the hand was *before* the pinch
+    private val histX = FloatArray(12); private val histY = FloatArray(12); private val histT = LongArray(12)
+    private var histN = 0
+
+    private fun remember(bx: Float, by: Float, t: Long) {
+        val i = histN % histX.size
+        histX[i] = bx; histY[i] = by; histT[i] = t; histN++
+    }
+
+    /**
+     * Anchor from ~[agoMs] before now plus how much it wandered in the ~200 ms before
+     * that (in reference units). Null if there isn't enough history.
+     */
+    fun anchorBefore(nowMs: Long, agoMs: Long = 120): FloatArray? {
+        val n = minOf(histN, histX.size)
+        if (n < 4) return null
+        var best = -1
+        for (k in 0 until n) {
+            val i = (histN - 1 - k).mod(histX.size)
+            if (nowMs - histT[i] >= agoMs) { best = i; break }
+        }
+        if (best < 0) return null
+        var minX = Float.MAX_VALUE; var maxX = -Float.MAX_VALUE; var minY = Float.MAX_VALUE; var maxY = -Float.MAX_VALUE
+        for (k in 0 until n) {
+            val i = (histN - 1 - k).mod(histX.size)
+            val age = nowMs - histT[i]
+            if (age < agoMs || age > agoMs + 200) continue
+            minX = minOf(minX, histX[i]); maxX = maxOf(maxX, histX[i]); minY = minOf(minY, histY[i]); maxY = maxOf(maxY, histY[i])
+        }
+        val wander = if (minX == Float.MAX_VALUE) 0f else maxOf(maxX - minX, maxY - minY)
+        return floatArrayOf(histX[best], histY[best], wander)
+    }
 }

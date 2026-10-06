@@ -29,6 +29,9 @@ kotlin {
             api(libs.compose.animation)
             implementation(libs.compose.resources)
         }
+        commonTest.dependencies {
+            implementation(kotlin("test"))
+        }
         getByName("desktopMain") {
             dependencies {
                 implementation(compose.desktop.currentOs)

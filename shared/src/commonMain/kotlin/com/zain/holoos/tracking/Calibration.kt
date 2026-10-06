@@ -18,6 +18,7 @@ class CalibrationSession(
     private val engine: GestureEngine,
     private val onSample: () -> Unit,
     private val onDone: () -> Unit,
+    private val onReject: () -> Unit,
 ) {
     enum class Step { NoTracker, FindUser, RaiseHand, Targets, Done }
 
@@ -28,13 +29,15 @@ class CalibrationSession(
     var progress by mutableFloatStateOf(0f); private set
     var errorPx by mutableFloatStateOf(0f); private set
     var bodyMode by mutableStateOf(true); private set
+    /** Feedback when a pinch or the final fit is rejected. */
+    var hint by mutableStateOf(""); private set
 
     private val samples = ArrayList<FloatArray>()
     private var stepStart = 0L
     private var lastTick = 0L
 
     fun start(trackerAvailable: Boolean, nowMs: Long) {
-        samples.clear(); index = 0; progress = 0f; stepStart = nowMs; lastTick = nowMs
+        samples.clear(); index = 0; progress = 0f; stepStart = nowMs; lastTick = nowMs; hint = ""
         step = if (trackerAvailable) Step.FindUser else Step.NoTracker
         engine.captureHook = { start, _ -> if (start) capture() }
     }
@@ -63,24 +66,44 @@ class CalibrationSession(
 
     private fun next(s: Step, nowMs: Long) { step = s; progress = 0f; stepStart = nowMs }
 
+    private fun reject(msg: String) { hint = msg; onReject() }
+
     private fun capture() {
         if (step != Step.Targets) return
-        if (engine.lastAnchorBodySpace != bodyMode) return
+        bodyMode = engine.lastAnchorBodySpace
+        // Where the hand was just before the fingers closed, and whether it was steady.
+        val a = engine.anchorBefore(lastTick) ?: return reject("Hold your hand in view a moment, then pinch")
+        val unit = if (bodyMode) 1f else 0.25f
+        if (a[2] > 0.12f * unit) return reject("Hold still for a moment before you pinch")
+        if (samples.any { kotlin.math.hypot(it[0] - a[0], it[1] - a[1]) < 0.15f * unit }) {
+            return reject("Move your hand toward the new target before pinching")
+        }
         val (tx, ty) = targets[index]
-        samples += floatArrayOf(engine.lastAnchorB[0], engine.lastAnchorB[1], tx, ty)
+        samples += floatArrayOf(a[0], a[1], tx, ty)
+        hint = ""
         onSample()
         index++
         if (index >= targets.size) finish()
     }
 
     private fun finish() {
-        val fit = Calibration.fit(bodyMode, samples)
-        if (fit == null) { index = 0; samples.clear(); return }
-        engine.applyCalibration(fit.first)
-        errorPx = fit.second * kotlin.math.max(w, h)
-        step = Step.Done
-        onDone()
+        when (val fit = Calibration.fit(bodyMode, samples)) {
+            is Calibration.Companion.Fitted -> {
+                engine.applyCalibration(fit.calibration)
+                errorPx = fit.rmsError * kotlin.math.max(w, h)
+                step = Step.Done
+                hint = ""
+                onDone()
+            }
+            is Calibration.Companion.Rejected -> {
+                // Keep the previous calibration; start the targets again.
+                samples.clear(); index = 0
+                reject("${fit.reason}. Let's redo the targets.")
+            }
+        }
     }
+
+    fun reset() { engine.clearCalibration(); hint = "Calibration cleared: using the default mapping" }
 
     fun restart(nowMs: Long) = start(true, nowMs)
 }
