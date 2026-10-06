@@ -93,7 +93,8 @@ fun GesturePanel(holo: HoloOsState, modifier: Modifier = Modifier) {
                 TrackerStatus.Off -> "CAMERA OFF"
             }
             val ok = status == TrackerStatus.Running
-            BasicText("HAND CONTROL · $statusText", style = holoText(10.sp, if (ok) HoloColors.Cyan else HoloColors.Amber, spacing = 2.sp))
+            val src = if (ok) " · ${holo.tracker?.source}" else ""
+            BasicText("HAND CONTROL · $statusText$src", style = holoText(10.sp, if (ok) HoloColors.Cyan else HoloColors.Amber, spacing = 2.sp))
             if (g != null && ok) {
                 BasicText(
                     "CAM ${g.cameraFps.toInt()} FPS · PIPE ${g.pipeLatencyMs.toInt()} MS · ${if (g.calibration != null) "CALIBRATED" else "DEFAULT MAP"}",

@@ -40,6 +40,13 @@ Set `HOLOOS_TRACKER=off` to disable the camera.
 | Fist, hold ~1 s | Home |
 | Thumbs up, hold | Accept the predicted target |
 
+## Phone as the camera (Android, USB)
+
+Install the app on the phone (Android Studio, `androidApp`), open **HoloOS Sensor**, prop the
+phone facing you, and start HoloOS on the laptop. The laptop sets up `adb reverse` over the
+cable, switches to the phone automatically and stops the webcam tracker. The phone runs
+MediaPipe on its GPU and sends only landmarks; its screen shows a skeleton, never the image.
+
 ## Controls
 
 | Action | Mouse / keyboard | Touch |

@@ -24,4 +24,15 @@ android {
 dependencies {
     implementation(project(":shared"))
     implementation(libs.androidx.activity.compose)
+    implementation(libs.camerax.camera2)
+    implementation(libs.camerax.lifecycle)
+    implementation(libs.mediapipe.tasks.vision)
+}
+
+// The phone sensor uses the same MediaPipe models as the desktop tracker
+// (downloaded by tools/tracker/setup.ps1), packaged as assets.
+androidComponents {
+    onVariants { variant ->
+        variant.sources.assets?.addStaticSourceDirectory(rootProject.file("tools/tracker/models").absolutePath)
+    }
 }

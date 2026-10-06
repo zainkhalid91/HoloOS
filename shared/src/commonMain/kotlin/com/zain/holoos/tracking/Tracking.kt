@@ -34,6 +34,8 @@ enum class TrackerStatus { Off, NotInstalled, Starting, Running, NoSignal, Faile
 interface TrackerLink {
     val latest: TrackFrame?
     val status: TrackerStatus
+    /** "PHONE" when the phone sensor is streaming, else "WEBCAM". */
+    val source: String
     fun stop()
 }
 
