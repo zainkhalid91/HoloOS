@@ -110,6 +110,10 @@ interface GestureSink {
     fun onFling(vx: Float, vy: Float)
     /** The other hand closed into a fist: stop whatever is moving. */
     fun onHold()
+    /** Two open hands moving apart (+) / together (−). Screen-only zoom, never navigates. */
+    fun onSpread(amount: Float, at: Offset)
+    /** A movement recognised as the hand travelling back after a stroke (ignored). */
+    fun onReturnIgnored(kind: String)
     fun onZoom(amount: Float, at: Offset)
     fun onBack()
     fun onHome()
@@ -143,6 +147,8 @@ class HandView {
  * (more hand movement per screen width). Tuned down after "too fast to control".
  */
 private const val CAMERA_REGION_W = 0.62f
+/** Open-hand speed (screen px/s) that counts as a deliberate swipe. */
+private const val SWIPE_SPEED = 1800f
 private const val CAMERA_REGION_H = 0.58f
 
 class GestureEngine(private val sink: GestureSink) {
@@ -205,6 +211,20 @@ class GestureEngine(private val sink: GestureSink) {
     private val velValid = BooleanArray(2)
     private var lastFlingT = 0L
     private var openDist = 0f
+    private var openDistSmooth = 0f
+    private var spreadSign = 0
+    // Swipe bursts: one fling per swipe, upgraded only if the swipe gets faster.
+    private var fastFrames = 0
+    private var burstPeak = 0f
+    // Return-stroke filter ("clutch"): after a stroke, the hand travels back to get ready
+    // for the next one. Opposite-direction motion shortly after a stroke is that reset.
+    private var burstDirX = 0f; private var burstDirY = 0f; private var burstIgnored = false
+    private var lastStrokeDirX = 0f; private var lastStrokeDirY = 0f
+    private var lastStrokePeak = 0f; private var lastStrokeEnd = 0L
+    private var spreadEpisode = 0          // sign of the zoom stroke in progress (0 = none)
+    private var spreadEpisodeIgnored = false
+    private var spreadQuietFrames = 0
+    private var lastSpreadSign = 0; private var lastSpreadEnd = 0L
     private var secondFistFrames = 0
     private var twoPinchSince = 0L
     private var lastCursorT = 0L
@@ -369,35 +389,77 @@ class GestureEngine(private val sink: GestureSink) {
         fun openish(h: HandView) = h.pose != HandPose.Fist && h.pose != HandPose.Pinch
 
         // Two hands, palms open: apart = zoom in, together = zoom out (clap / spread).
+        // Log showed single-frame jumps of +121% / −205% from hand jitter: the distance is
+        // smoothed, the direction must hold for 2 frames, and each step is capped.
         var twoHandZooming = false
         if (flingClaimed && bothVisible && openish(hands[0]) && openish(hands[1])) {
             val d = hypot(hands[0].rawCursorX - hands[1].rawCursorX, hands[0].rawCursorY - hands[1].rawCursorY)
+            openDistSmooth = if (openDistSmooth == 0f) d else openDistSmooth + (d - openDistSmooth) * 0.45f
             if (openDist > 0f) {
-                val rate = (d - openDist) / dt
-                if (abs(rate) > 450f) {
-                    val mid = Offset((hands[0].rawCursorX + hands[1].rawCursorX) / 2, (hands[0].rawCursorY + hands[1].rawCursorY) / 2)
-                    sink.onZoom((d / openDist - 1f) * 2.5f, mid)
+                val rate = (openDistSmooth - openDist) / dt
+                val sign = if (rate > 600f) 1 else if (rate < -600f) -1 else 0
+                if (sign != 0 && sign == spreadSign) {
+                    if (spreadEpisode != sign) {
+                        // A new zoom stroke begins. Opposite to the last one and soon after it?
+                        // Then the hands are just travelling back: ignore this stroke.
+                        if (spreadEpisode != 0) endSpread(t)
+                        spreadEpisode = sign
+                        spreadEpisodeIgnored = lastSpreadSign == -sign && t - lastSpreadEnd < 800
+                        if (spreadEpisodeIgnored) sink.onReturnIgnored(if (sign > 0) "spread-apart" else "spread-together")
+                    }
+                    spreadQuietFrames = 0
+                    if (!spreadEpisodeIgnored) {
+                        val mid = Offset((hands[0].rawCursorX + hands[1].rawCursorX) / 2, (hands[0].rawCursorY + hands[1].rawCursorY) / 2)
+                        sink.onSpread(((openDistSmooth / openDist - 1f) * 1.2f).coerceIn(-0.15f, 0.15f), mid)
+                        now += Gesture.TwoHandZoom
+                    }
                     twoHandZooming = true
-                    now += Gesture.TwoHandZoom
-                }
+                } else if (spreadEpisode != 0 && ++spreadQuietFrames >= 2) endSpread(t)
+                spreadSign = sign
             }
-            openDist = d
-        } else openDist = 0f
+            openDist = openDistSmooth
+        } else {
+            if (spreadEpisode != 0) endSpread(t)
+            openDist = 0f; openDistSmooth = 0f; spreadSign = 0
+        }
 
         if (pose == HandPose.Open) now += Gesture.OpenPalm
         if (flingClaimed) {
             // Either hand: a fast open-hand swipe spins the globe along the swipe direction.
-            if (!twoHandZooming && !pinching && !gripping && t - lastFlingT > 80) {
+            // Repositioning the hand reached 1,359 px/s (75th pct), so swipes need 1,800+
+            // for two frames. One fling per swipe; later frames only upgrade a faster swipe.
+            var best = -1; var bestSpeed = 0f
+            if (!twoHandZooming && !pinching && !gripping) {
                 for (i in 0..1) {
                     val hv = hands[i]
                     if (!hv.visible || hv.pose != HandPose.Open) continue
-                    if (hypot(handVx[i], handVy[i]) > 1100f) {
-                        lastFlingT = t
-                        sink.onFling(handVx[i], handVy[i])
-                        now += Gesture.Swipe
-                        break
-                    }
+                    val sp = hypot(handVx[i], handVy[i])
+                    if (sp > bestSpeed) { bestSpeed = sp; best = i }
                 }
+            }
+            if (best >= 0 && bestSpeed > SWIPE_SPEED) {
+                fastFrames++
+                val dx = handVx[best] / bestSpeed; val dy = handVy[best] / bestSpeed
+                if (fastFrames == 2) {
+                    // Burst starts: is this the hand travelling back after the last swipe?
+                    burstDirX = dx; burstDirY = dy
+                    val opposite = dx * lastStrokeDirX + dy * lastStrokeDirY < -0.3f
+                    burstIgnored = opposite && t - lastStrokeEnd < 700 && bestSpeed < lastStrokePeak * 1.6f
+                    if (burstIgnored) sink.onReturnIgnored("swipe")
+                }
+                if (fastFrames >= 2 && !burstIgnored && bestSpeed > burstPeak * 1.15f) {
+                    burstPeak = bestSpeed; lastFlingT = t
+                    sink.onFling(handVx[best], handVy[best])
+                }
+                if (fastFrames >= 2 && !burstIgnored) now += Gesture.Swipe
+            } else if (bestSpeed < SWIPE_SPEED * 0.6f) {
+                if (fastFrames >= 2) {
+                    // Burst ended. A real swipe becomes the reference; an ignored return
+                    // stroke only refreshes the time, so the next forward swipe is allowed.
+                    if (!burstIgnored) { lastStrokeDirX = burstDirX; lastStrokeDirY = burstDirY; lastStrokePeak = burstPeak }
+                    lastStrokeEnd = t
+                }
+                fastFrames = 0; burstPeak = 0f; burstIgnored = false
             }
         } else if (pose == HandPose.Open && t > swipeCooldownUntil && vx < -2.0f * screenW && abs(vx) > 2f * abs(vy)) {
             swipeCooldownUntil = t + 800
@@ -428,7 +490,7 @@ class GestureEngine(private val sink: GestureSink) {
         hands.forEach { it.visible = false }
         if (pinching) { pinching = false; sink.onPress(false) }
         if (gripping) { gripping = false; sink.onGrip(false) }
-        twoPinchSince = 0L; openDist = 0f; velValid[0] = false; velValid[1] = false; secondFistFrames = 0
+        twoPinchSince = 0L; openDist = 0f; openDistSmooth = 0f; spreadSign = 0; fastFrames = 0; burstPeak = 0f; velValid[0] = false; velValid[1] = false; secondFistFrames = 0
         dragging = false; twoHandDist = 0f; pose = HandPose.None; holdPose = HandPose.None; holdProgress = 0f
         fx.reset(); fy.reset(); lastCursorT = 0L; lastPrimaryAx = -1f; outlierFrames = 0
         if (active.isNotEmpty()) active = emptySet()
@@ -539,6 +601,12 @@ class GestureEngine(private val sink: GestureSink) {
             else -> Offset((ax / aspect - 0.5f) / CAMERA_REGION_W + 0.5f, (ay - 0.45f) / CAMERA_REGION_H + 0.5f)
         }
         return Offset(p.x.coerceIn(-0.05f, 1.05f), p.y.coerceIn(-0.05f, 1.05f))
+    }
+
+    private fun endSpread(t: Long) {
+        if (!spreadEpisodeIgnored) lastSpreadSign = spreadEpisode
+        lastSpreadEnd = t
+        spreadEpisode = 0; spreadEpisodeIgnored = false; spreadQuietFrames = 0
     }
 
     fun applyCalibration(c: Calibration) { calibration = c; saveSetting("calibration-$sourceKey", c.serialize()) }

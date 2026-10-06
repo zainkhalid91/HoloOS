@@ -245,6 +245,11 @@ class HoloOsState(private val scope: CoroutineScope) {
             screenFling?.invoke(vx, vy)
         }
         override fun onHold() { event("hold", ""); screenHold?.invoke() }
+        override fun onReturnIgnored(kind: String) { event("return-ignored", kind) }
+        override fun onSpread(amount: Float, at: Offset) {
+            event("spread", ((amount * 100).toInt() / 100f).toString())
+            screenZoom?.invoke(amount, at)
+        }
         override fun onGrip(closed: Boolean) {
             if (closed) {
                 pressTarget = targets.at(hand.x, hand.y)?.takeIf { it.grab != com.zain.holoos.input.Grab.None }
