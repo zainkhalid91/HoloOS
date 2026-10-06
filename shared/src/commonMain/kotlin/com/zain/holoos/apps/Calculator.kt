@@ -204,7 +204,7 @@ fun pressWithSound(holo: com.zain.holoos.core.HoloOsState, k: String) {
     val before = holo.calculator.display
     holo.calculator.press(k)
     when {
-        holo.calculator.display == "ERROR" && before != "ERROR" -> holo.sfx(com.zain.holoos.audio.Sfx.Error)
+        holo.calculator.display == "ERROR" && before != "ERROR" -> holo.sfx(com.zain.holoos.audio.Sfx.Denied)
         k.length == 1 && k[0].isDigit() -> holo.sfx(com.zain.holoos.audio.Sfx.Key, pitch = 0.75f * pentatonic[k[0] - '0'])
         k == "=" -> holo.sfx(com.zain.holoos.audio.Sfx.Lock)
         else -> holo.sfx(com.zain.holoos.audio.Sfx.KeyOp)

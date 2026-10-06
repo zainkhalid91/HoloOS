@@ -143,6 +143,8 @@ class ListingCache(private val scope: CoroutineScope, private val source: com.za
     private val done = HashMap<String, List<FsNode>>()
     private val pending = HashMap<String, kotlinx.coroutines.Deferred<List<FsNode>>>()
     private val prefetched = androidx.compose.runtime.mutableStateMapOf<String, Boolean>()
+    /** Called when a speculative prefetch finishes (plays the pop-up chime). */
+    var onPrefetched: (() -> Unit)? = null
 
     fun cached(node: FsNode): List<FsNode>? = done[node.path]
 
@@ -160,6 +162,7 @@ class ListingCache(private val scope: CoroutineScope, private val source: com.za
         scope.launch {
             val kids = list(node)
             kids.filter { it.isDirectory }.take(48).forEach { list(it) }
+            onPrefetched?.invoke()
         }
     }
 
@@ -204,9 +207,10 @@ class HoloOsState(private val scope: CoroutineScope) {
     init {
         navigator.onDiveIn = { sfx(Sfx.DiveIn) }
         navigator.onDiveOut = { sfx(Sfx.DiveOut) }
+        listings.onPrefetched = { sfx(Sfx.Notify, gain = 0.45f) }
         targets.onHoverEnter = { sfx(Sfx.Hover, pitch = 0.95f + Random.nextFloat() * 0.1f) }
         scope.launch(Dispatchers.Default) {
-            SoundBank.warmUp()
+            SoundBank.warmUp { path -> com.zain.holoos.res.Res.readBytes(path) }
             startAudio(mixer)
             sfx(Sfx.Boot)
         }

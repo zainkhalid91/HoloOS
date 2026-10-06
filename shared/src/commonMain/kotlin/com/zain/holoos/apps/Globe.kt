@@ -144,6 +144,7 @@ fun GlobeView() {
         selected = i
         cam.flyTo(worldCities[i], maxOf(cam.zoom, 2.6f))
         holo.sfx(Sfx.Lock)
+        holo.sfx(Sfx.Telemetry, gain = 0.5f)
         holo.burst(Offset(proj.x[i], proj.y[i]), warm = true)
     }
 

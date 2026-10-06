@@ -58,6 +58,7 @@ import kotlin.math.min
 fun FilesView(node: FsNode) {
     val holo = LocalHolo.current
     val children by produceState(holo.listings.cached(node), node) { value = holo.listings.list(node) }
+    androidx.compose.runtime.LaunchedEffect(node) { holo.sfx(com.zain.holoos.audio.Sfx.Telemetry, gain = 0.8f) }
     val grid = rememberLazyGridState()
 
     Column(Modifier.fillMaxSize().padding(horizontal = 28.dp)) {

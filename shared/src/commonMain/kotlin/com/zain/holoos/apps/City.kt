@@ -66,6 +66,12 @@ fun CityView(city: WorldCity) {
     val buildings = remember(city) { buildCity(city) }
     val orbit = remember { Orbit() }
     val path = remember { Path() }
+    androidx.compose.runtime.LaunchedEffect(city) {
+        kotlinx.coroutines.delay(250)
+        holo.sfx(com.zain.holoos.audio.Sfx.Telemetry)
+        kotlinx.coroutines.delay(900)
+        holo.sfx(com.zain.holoos.audio.Sfx.Notify, gain = 0.7f)
+    }
     val tops = remember { Path() }
 
     Box(Modifier.fillMaxSize()) {
