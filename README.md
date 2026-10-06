@@ -1,0 +1,50 @@
+# HoloOS
+
+A gesture-driven holographic interface for Windows and Android, built with Compose Multiplatform.
+Today it is driven by mouse and touch; the camera hand-tracker will feed the same `HandState`.
+
+## Run it
+
+**Android Studio (both platforms)**
+1. File → Open → `D:\AndroidStudioProjects\HoloOS`, let Gradle sync.
+2. Pick a run configuration from the toolbar:
+   - **androidApp** → phone or emulator (landscape).
+   - **HoloOS Desktop** → the Windows app (runs `:shared:run`).
+
+**Command line (Windows)**
+```powershell
+.\run-desktop.ps1            # fullscreen
+.\run-desktop.ps1 -Windowed  # 1600x900 window
+```
+
+## Controls
+
+| Action | Mouse / keyboard | Touch |
+| --- | --- | --- |
+| Dive into a hologram | Click, or scroll up over it | Tap, or pinch out over it |
+| Rise one level | Scroll down on empty space, `Esc`, or ◄ BACK | Pinch in, back gesture |
+| Home | `H` | — |
+| Toggle prediction | `P` | — |
+| Spin the globe | Drag | Drag |
+| Quit (fullscreen) | `Alt+F4` | — |
+
+## Layout
+
+```
+shared/src/commonMain/kotlin/com/zain/holoos/
+  core/      HoloOsApp (root, input, backdrop, overlay), HoloState (navigator, particles), Hud
+  input/     HandState + MotionPredictor + IntentModel, HoloTarget registry
+  holo/      palette, additive glow primitives
+  apps/      Home (arc reactor), Files (nested holograms), Calculator, Globe
+  fs/        file source: real disk on desktop, demo drive on Android
+shared/src/desktopMain   Window entry point, cursor hiding
+androidApp/              Android activity
+```
+
+## How the "instant" feel works
+
+- `MotionPredictor` extrapolates the hand ~110 ms ahead from smoothed velocity and acceleration.
+- `IntentModel` turns distance and heading into a probability per target (softmax). Targets above
+  the threshold pre-charge in amber before the hand arrives.
+- All per-frame values are float state read only in draw blocks, so animation never recomposes.
+- Navigation is semantic zoom: each screen grows out of the element it was opened from.
