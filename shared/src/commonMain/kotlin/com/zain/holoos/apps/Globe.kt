@@ -137,7 +137,13 @@ fun GlobeView() {
             else if (cam.zoom > 1.02f) { cam.flying = false; cam.zoom = maxOf(1f, cam.zoom / (1f - amount * 0.6f)); true }
             else false
         }
-        onDispose { holo.screenZoom = null }
+        holo.screenDrag = { dx, dy ->
+            val r = min(holo.size.width, holo.size.height) * 0.36f * cam.zoom
+            cam.flying = false
+            cam.yaw += dx / r; cam.pitch = (cam.pitch + dy / r).coerceIn(-1.45f, 1.45f)
+            cam.vYaw = dx / r * 30f
+        }
+        onDispose { holo.screenZoom = null; holo.screenDrag = null; holo.screenTap = null }
     }
 
     fun select(i: Int) {
@@ -147,6 +153,8 @@ fun GlobeView() {
         holo.sfx(Sfx.Telemetry, gain = 0.5f)
         holo.burst(Offset(proj.x[i], proj.y[i]), warm = true)
     }
+
+    holo.screenTap = { at -> val i = nearestCity(proj, at, 30f); if (i >= 0) { select(i); true } else false }
 
     Box(Modifier.fillMaxSize()) {
         Canvas(

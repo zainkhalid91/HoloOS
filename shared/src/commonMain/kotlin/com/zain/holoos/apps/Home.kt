@@ -36,12 +36,13 @@ import com.zain.holoos.holo.glowPath
 import com.zain.holoos.holo.hexPath
 import com.zain.holoos.holo.holoText
 import com.zain.holoos.input.HoloTarget
+import com.zain.holoos.tracking.handHologram
 import com.zain.holoos.input.HoloTargetEntry
 import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.sin
 
-private enum class Glyph { Folder, Calculator, Globe }
+private enum class Glyph { Folder, Calculator, Globe, Hand }
 
 private class AppNode(val id: String, val label: String, val glyph: Glyph, val angleDeg: Float, val screen: () -> Screen)
 
@@ -52,6 +53,7 @@ fun HomeView() {
         AppNode("app-files", "FILES", Glyph.Folder, 200f) { FilesScreen(holo.files.root()) },
         AppNode("app-globe", "GLOBE", Glyph.Globe, 340f) { GlobeScreen },
         AppNode("app-calc", "CALCULATOR", Glyph.Calculator, 90f) { CalculatorScreen },
+        AppNode("app-hands", "HANDS", Glyph.Hand, 270f) { com.zain.holoos.core.HandsScreen },
     )
 
     BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -127,6 +129,13 @@ private fun DrawScope.glyph(g: Glyph, c: Offset, r: Float, col: Color, t: Float,
                 glowCircle(col, p, s * 0.42f, 1.2f, lit * (if ((i + j + (t * 2).toInt()) % 4 == 0) 1.3f else 0.7f))
             }
         }
+        Glyph.Hand -> {
+            val pts = com.zain.holoos.apps.REST_HAND
+            val k = r * 1.5f
+            val wave = kotlin.math.sin(t * 2f) * 0.06f
+            val scaled = FloatArray(42) { i -> if (i % 2 == 0) (pts[i] + wave * (pts[i + 1] + 0.5f)) * k else pts[i] * k }
+            handHologram(c, scaled, col, lit * 0.8f, tipRings = false)
+        }
         Glyph.Globe -> {
             glowCircle(col, c, r, 1.4f, lit)
             for (k in 0..3) {
@@ -178,3 +187,12 @@ fun DrawScope.arcReactor(c: Offset, r: Float, t: Float) {
     drawCircle(HoloColors.Cyan, r * 0.3f, c, alpha = 0.10f * breathe, blendMode = BlendMode.Plus)
     glowDot(HoloColors.Ice, c, r * 0.05f, breathe)
 }
+
+/** A relaxed open hand (wrist at the bottom), unit scale centred on the palm. */
+internal val REST_HAND = floatArrayOf(
+    0f, 0.55f, -0.22f, 0.42f, -0.36f, 0.26f, -0.46f, 0.12f, -0.55f, 0.0f,
+    -0.16f, 0.05f, -0.19f, -0.18f, -0.21f, -0.32f, -0.22f, -0.44f,
+    0f, 0f, 0f, -0.26f, 0f, -0.41f, 0f, -0.54f,
+    0.14f, 0.03f, 0.17f, -0.2f, 0.19f, -0.34f, 0.2f, -0.45f,
+    0.26f, 0.1f, 0.32f, -0.08f, 0.36f, -0.18f, 0.39f, -0.27f,
+)

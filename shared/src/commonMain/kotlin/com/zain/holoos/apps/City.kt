@@ -74,6 +74,11 @@ fun CityView(city: WorldCity) {
     }
     val tops = remember { Path() }
 
+    androidx.compose.runtime.DisposableEffect(orbit) {
+        holo.screenDrag = { dx, _ -> orbit.angle += dx * 0.006f; orbit.vel = dx * 0.2f }
+        onDispose { holo.screenDrag = null }
+    }
+
     Box(Modifier.fillMaxSize()) {
         Canvas(
             Modifier.fillMaxSize().pointerInput(Unit) {

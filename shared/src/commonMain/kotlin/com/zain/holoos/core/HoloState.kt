@@ -42,6 +42,7 @@ data object HomeScreen : Screen { override val title = "Core" }
 data class FilesScreen(val node: FsNode) : Screen { override val title = node.name }
 data object CalculatorScreen : Screen { override val title = "Calculator" }
 data object GlobeScreen : Screen { override val title = "Globe" }
+data object HandsScreen : Screen { override val title = "Hands" }
 data class CityScreen(val city: com.zain.holoos.geo.WorldCity) : Screen { override val title = city.name }
 
 class NavEntry(val id: Int, val screen: Screen, val origin: Rect?)
@@ -185,6 +186,49 @@ class HoloOsState(private val scope: CoroutineScope) {
     val prior = UsagePrior()
     val intentScore = IntentScore()
 
+    /** Camera hand tracking (desktop: MediaPipe sidecar over UDP). Null when unavailable. */
+    val tracker: com.zain.holoos.tracking.TrackerLink? =
+        if (com.zain.holoos.core.trackingEnabled()) com.zain.holoos.tracking.startTracker() else null
+    val gestures: com.zain.holoos.tracking.GestureEngine? = tracker?.let { com.zain.holoos.tracking.GestureEngine(HandSink()) }
+    val calibration: com.zain.holoos.tracking.CalibrationSession? = gestures?.let {
+        com.zain.holoos.tracking.CalibrationSession(it, onSample = { sfx(Sfx.Lock) }, onDone = { sfx(Sfx.Notify) })
+    }
+    var trackerStatus by mutableStateOf(com.zain.holoos.tracking.TrackerStatus.Off)
+        private set
+
+    /** Screens can take hand drags (globe spin) and free taps (city markers). */
+    var screenDrag: ((dx: Float, dy: Float) -> Unit)? = null
+    var screenTap: ((at: Offset) -> Boolean)? = null
+
+    /** Translates gesture events into the same paths mouse and touch use. */
+    private inner class HandSink : com.zain.holoos.tracking.GestureSink {
+        override fun onCursor(x: Float, y: Float, timeMs: Long) = predictor.onSample(x, y, this@HoloOsState.timeMs)
+        override fun onPress(pressed: Boolean) { hand.pressed = pressed }
+        override fun onTap(x: Float, y: Float) = activateAt(Offset(x, y))
+        override fun onDrag(dx: Float, dy: Float) { screenDrag?.invoke(dx, dy) }
+        override fun onZoom(amount: Float, at: Offset) = zoomGesture(amount, at)
+        override fun onBack() { navigator.back() }
+        override fun onHome() { if (navigator.canGoBack) { sfx(Sfx.KeyOp); navigator.home() } }
+        override fun onAccept() {
+            val top = targets.top()?.takeIf { it.probability > 0.3f } ?: return
+            sfx(Sfx.Notify, gain = 0.6f)
+            activateAt(top.bounds.center)
+        }
+        override fun onHandsLost() { predictor.reset() }
+    }
+
+    /** A hand "tap": the target under the point gets the same treatment as a click. */
+    fun activateAt(at: Offset) {
+        if (navigator.transition != null) return
+        val t = targets.at(at.x, at.y)
+        when {
+            t?.onTap != null -> t.onTap?.invoke()
+            t?.onDive != null -> { t.pulse = 1f; burst(at, warm = true); onTargetUsed(t); t.onDive?.invoke(t.bounds) }
+            screenTap?.invoke(at) == true -> {}
+            else -> burst(at)
+        }
+    }
+
     var size by mutableStateOf(Size.Zero)
     /** Monotonic animation clock in ms; read it only in draw blocks. */
     var timeMs by mutableLongStateOf(0L)
@@ -239,6 +283,12 @@ class HoloOsState(private val scope: CoroutineScope) {
         lastNanos = nanos
         timeMs = nanos / 1_000_000L
         predictor.enabled = predictionOn
+        tracker?.let { tr ->
+            val wall = com.zain.holoos.geo.epochMillis()
+            gestures?.process(tr.latest, wall, size.width, size.height)
+            calibration?.tick(wall, size.width, size.height)
+            if (trackerStatus != tr.status) trackerStatus = tr.status
+        }
         predictor.tick(timeMs, size.width, size.height)
         targets.tick(hand, dt)
         val ctx = context

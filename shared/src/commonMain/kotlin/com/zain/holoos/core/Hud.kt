@@ -67,8 +67,12 @@ fun Hud() {
             )
         }
 
+        if (holo.tracker != null) {
+            com.zain.holoos.tracking.GesturePanel(holo, Modifier.align(Alignment.BottomStart).padding(bottom = 18.dp))
+        }
+
         BasicText(
-            "TAP OR SCROLL-ZOOM TO DIVE  ·  SCROLL OUT / ESC TO RISE  ·  H HOME  ·  P PREDICTION  ·  M SOUND  ·  G GLOBE MODE",
+            "TAP OR SCROLL-ZOOM TO DIVE  ·  SCROLL OUT / ESC TO RISE  ·  H HOME  ·  P PREDICTION  ·  M SOUND  ·  G GLOBE MODE  ·  C CALIBRATE HANDS",
             style = holoText(10.sp, HoloColors.Muted, glow = 0f),
             modifier = Modifier.align(Alignment.BottomCenter),
         )

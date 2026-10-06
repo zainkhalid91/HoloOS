@@ -43,6 +43,7 @@ import com.zain.holoos.holo.glowCircle
 import com.zain.holoos.holo.glowDot
 import com.zain.holoos.holo.glowLine
 import com.zain.holoos.holo.glowPath
+import com.zain.holoos.tracking.drawTrackedHands
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
@@ -79,6 +80,7 @@ fun HoloOsApp(state: HoloOsState = rememberHoloOsState()) {
                         Key.P -> { state.predictionOn = !state.predictionOn; true }
                         Key.H -> { state.navigator.home(); true }
                         Key.M -> { state.toggleMute(); true }
+                        Key.C -> { if (state.navigator.top.screen != HandsScreen) state.navigator.push(HandsScreen, androidx.compose.ui.geometry.Rect(state.size.width / 2 - 60f, state.size.height / 2 - 60f, state.size.width / 2 + 60f, state.size.height / 2 + 60f)); true }
                         Key.G -> { state.earthMode = if (state.earthMode == EarthMode.Real) EarthMode.Holo else EarthMode.Real; true }
                         else -> false
                     }
@@ -189,6 +191,7 @@ private fun ScreenContent(screen: Screen) {
         CalculatorScreen -> CalculatorView()
         GlobeScreen -> GlobeView()
         is CityScreen -> com.zain.holoos.apps.CityView(screen.city)
+        HandsScreen -> com.zain.holoos.apps.HandsSetupView()
     }
 }
 
@@ -281,6 +284,8 @@ private fun Overlay() {
                 alpha = l.coerceIn(0f, 1f), blendMode = BlendMode.Plus,
             )
         }
+
+        drawTrackedHands(holo)
 
         if (hand.visible) {
             val c = hand.position

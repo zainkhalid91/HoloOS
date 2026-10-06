@@ -8,3 +8,5 @@ actual fun Modifier.hiddenCursor(): Modifier = this
 
 private val fmt = DateTimeFormatter.ofPattern("HH:mm:ss")
 actual fun clockText(): String = LocalTime.now().format(fmt)
+
+actual fun trackingEnabled(): Boolean = false

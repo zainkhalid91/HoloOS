@@ -17,6 +17,29 @@ Today it is driven by mouse and touch; the camera hand-tracker will feed the sam
 .\run-desktop.ps1 -Windowed  # 1600x900 window
 ```
 
+## Hand tracking (Windows)
+
+One-time setup (Python venv, MediaPipe, models):
+```powershell
+powershell -ExecutionPolicy Bypass -File tools	racker\setup.ps1
+```
+After that HoloOS starts the tracker automatically. Open **HANDS** on the home screen (or press
+`C`) to calibrate: the camera finds your shoulders, you raise an open hand, then pinch at five
+targets from a relaxed position. Calibration is saved in `%USERPROFILE%\.holoos`.
+
+Privacy: the tracker sends only landmark coordinates over localhost. No video, no face, nothing saved.
+Set `HOLOOS_TRACKER=off` to disable the camera.
+
+| Gesture | Action |
+| --- | --- |
+| Point | Move the cursor |
+| Pinch (quick) | Select / open |
+| Pinch + move | Drag / spin (globe, city) |
+| Pinch with both hands | Zoom in / out |
+| Open palm, swipe left | Back |
+| Fist, hold ~1 s | Home |
+| Thumbs up, hold | Accept the predicted target |
+
 ## Controls
 
 | Action | Mouse / keyboard | Touch |
