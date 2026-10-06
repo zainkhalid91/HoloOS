@@ -131,7 +131,17 @@ class HandView {
     var extended = ""
 }
 
+/**
+ * How much of the camera frame maps onto the whole screen. Larger = less sensitive
+ * (more hand movement per screen width). Tuned down after "too fast to control".
+ */
+private const val CAMERA_REGION_W = 0.62f
+private const val CAMERA_REGION_H = 0.58f
+
 class GestureEngine(private val sink: GestureSink) {
+    private fun palmX(h: TrackedHand) = (h.x(0) + h.x(5) + h.x(9) + h.x(13) + h.x(17)) / 5f * aspect
+    private fun palmY(h: TrackedHand) = (h.y(0) + h.y(5) + h.y(9) + h.y(13) + h.y(17)) / 5f
+
     /** Calibration is per camera: the phone and the webcam see you from different places. */
     var sourceKey = "WEBCAM"
         private set
@@ -170,7 +180,14 @@ class GestureEngine(private val sink: GestureSink) {
     private var shoulderSeenMs = 0L
     /** Once the shoulders have been seen, mapping stays body-relative for the session. */
     private var hasBodyReference = false
-    private val fx = OneEuro(1.4f, 0.006f); private val fy = OneEuro(1.4f, 0.006f)
+    // Session log: median jitter of a still hand was ~24 px/frame, so filter harder at rest.
+    private val fx = OneEuro(0.6f, 0.004f); private val fy = OneEuro(0.6f, 0.004f)
+    /** Output only moves once the filtered point leaves a small dead zone: kills residual shimmer. */
+    private var outX = 0f; private var outY = 0f
+    private val deadZonePx = 4f
+    private var lastPrimaryAx = -1f; private var lastPrimaryAy = -1f
+    private var bodyRatio = 0f; private var useBody = false
+    private var outlierFrames = 0
     private var lastCursorT = 0L
     private var lastCx = 0f; private var lastCy = 0f
     private var vx = 0f; private var vy = 0f
@@ -200,14 +217,16 @@ class GestureEngine(private val sink: GestureSink) {
     fun process(f: TrackFrame?, nowMs: Long, screenW: Float, screenH: Float) {
         if (f == null || screenW <= 0f) return
         frameNowMs = nowMs
-        if (nowMs - f.receivedMs > 400 || f.hands.isEmpty()) {
+        // Ignore low-confidence detections (spurious "hands" made the cursor jump).
+        val good = f.hands.filter { it.score >= 0.6f }
+        if (nowMs - f.receivedMs > 400 || good.isEmpty()) {
             if (lastSeenHandsMs != 0L && nowMs - lastSeenHandsMs > 250) handsLost()
-            if (f.id != lastFrame) { lastFrame = f.id; updateBody(f, nowMs) }
+            if (f.id != lastFrame) { lastFrame = f.id; lastFrameId = f.id; lastFrameHands = 0; updateBody(f, nowMs) }
             return
         }
         if (f.id == lastFrame) return
         lastFrame = f.id
-        lastFrameId = f.id; lastFrameHands = f.hands.size
+        lastFrameId = f.id; lastFrameHands = good.size
         processed++
         lastSeenHandsMs = nowMs
         aspect = f.aspect
@@ -215,15 +234,38 @@ class GestureEngine(private val sink: GestureSink) {
         pipeLatencyMs = pipeLatencyMs * 0.9f + (f.receivedMs - f.captureMs).toFloat().coerceIn(0f, 500f) * 0.1f
         updateBody(f, nowMs)
 
-        // Primary hand = the user's right hand if visible, else whichever is there.
-        val ordered = f.hands.sortedByDescending { it.isRight }.take(2)
+        // Primary hand = the one closest to where the primary hand was last frame.
+        // MediaPipe's left/right labels flip between frames, which teleported the cursor.
+        val ordered = if (lastPrimaryAx >= 0f && good.size == 2) {
+            good.sortedBy { h -> hypot(palmX(h) - lastPrimaryAx, palmY(h) - lastPrimaryAy) }
+        } else good.sortedByDescending { it.isRight }.take(2)
         for (i in 0..1) hands[i].visible = i < ordered.size
         ordered.forEachIndexed { i, h -> analyse(h, hands[i], screenW, screenH) }
 
         val primary = hands[0]
+        lastPrimaryAx = primary.anchorX; lastPrimaryAy = primary.anchorY
         val t = nowMs
         val dt = if (lastCursorT == 0L) 0.016f else ((t - lastCursorT) / 1000f).coerceIn(0.004f, 0.1f)
-        val cx = fx.filter(primary.cursorX, dt); val cy = fy.filter(primary.cursorY, dt)
+
+        // A single-frame jump across a third of the screen is a tracking glitch: hold
+        // position for up to two frames before believing it.
+        if (lastCursorT != 0L && hypot(primary.rawCursorX - outX, primary.rawCursorY - outY) > screenW * 0.33f && outlierFrames < 2) {
+            outlierFrames++
+            primary.cursorX = outX; primary.cursorY = outY
+            return
+        }
+        outlierFrames = 0
+
+        var cx = fx.filter(primary.cursorX, dt); var cy = fy.filter(primary.cursorY, dt)
+        if (lastCursorT == 0L || hypot(cx - outX, cy - outY) > deadZonePx) {
+            // Move by the excess beyond the dead zone so motion stays continuous.
+            val d = hypot(cx - outX, cy - outY)
+            if (lastCursorT == 0L || d <= 0f) { outX = cx; outY = cy } else {
+                val k = (d - deadZonePx) / d
+                outX += (cx - outX) * k; outY += (cy - outY) * k
+            }
+        }
+        cx = outX; cy = outY
         vx = vx * 0.6f + (cx - lastCx) / dt * 0.4f; vy = vy * 0.6f + (cy - lastCy) / dt * 0.4f
         val moveX = cx - lastCx; val moveY = cy - lastCy
         lastCx = cx; lastCy = cy; lastCursorT = t
@@ -268,13 +310,13 @@ class GestureEngine(private val sink: GestureSink) {
                     now += Gesture.Pinch
                 }
                 pose == HandPose.Pinch -> {
-                    if (!dragging && hypot(cx - pinchStartX, cy - pinchStartY) > 40f) dragging = true
+                    if (!dragging && t - pinchStartT > 180 && hypot(cx - pinchStartX, cy - pinchStartY) > 70f) dragging = true
                     if (dragging) { sink.onDrag(moveX, moveY); now += Gesture.PinchDrag } else now += Gesture.Pinch
                 }
                 pinching -> {
                     pinching = false
                     sink.onPress(false)
-                    if (!dragging && t - pinchStartT < 450) sink.onTap(pinchStartX, pinchStartY)
+                    if (!dragging && t - pinchStartT < 700) sink.onTap(pinchStartX, pinchStartY)
                     dragging = false
                 }
             }
@@ -293,7 +335,7 @@ class GestureEngine(private val sink: GestureSink) {
         // Hold gestures with a visible progress ring.
         val holdTarget = when (pose) { HandPose.Fist -> HandPose.Fist; HandPose.ThumbsUp -> HandPose.ThumbsUp; else -> HandPose.None }
         if (holdTarget != holdPose) { holdPose = holdTarget; holdStart = t; holdFired = false }
-        val needed = if (holdPose == HandPose.Fist) 900f else 550f
+        val needed = if (holdPose == HandPose.Fist) 1400f else 700f
         holdProgress = if (holdPose == HandPose.None || holdFired) 0f else ((t - holdStart) / needed).coerceIn(0f, 1f)
         if (holdPose == HandPose.Fist) now += Gesture.FistHold
         if (holdPose == HandPose.ThumbsUp) now += Gesture.ThumbsUp
@@ -309,7 +351,7 @@ class GestureEngine(private val sink: GestureSink) {
         hands.forEach { it.visible = false }
         if (pinching) { pinching = false; sink.onPress(false) }
         dragging = false; twoHandDist = 0f; pose = HandPose.None; holdPose = HandPose.None; holdProgress = 0f
-        fx.reset(); fy.reset(); lastCursorT = 0L
+        fx.reset(); fy.reset(); lastCursorT = 0L; lastPrimaryAx = -1f; outlierFrames = 0
         if (active.isNotEmpty()) active = emptySet()
         sink.onHandsLost()
     }
@@ -332,7 +374,12 @@ class GestureEngine(private val sink: GestureSink) {
         }
         bodyVisible = nowMs - shoulderSeenMs < 1000 && shoulderW > 0f
         if (!bodyVisible) shoulderRaw = null
-        hasBodyReference = shoulderW > 0f
+        // With the phone close up, shoulders were seen in only 3% of frames, so the map
+        // was anchored to a stale estimate. Use body space only while it is reliable.
+        bodyRatio = bodyRatio * 0.97f + (if (s != null) 0.03f else 0f)
+        if (!useBody && bodyRatio > 0.6f) useBody = true
+        if (useBody && bodyRatio < 0.3f) useBody = false
+        hasBodyReference = useBody && shoulderW > 0f
     }
 
     private fun analyse(h: TrackedHand, out: HandView, sw: Float, sh: Float) {
@@ -340,16 +387,32 @@ class GestureEngine(private val sink: GestureSink) {
         fun px(i: Int) = h.x(i) * a
         fun py(i: Int) = h.y(i)
         fun d(i: Int, j: Int) = hypot(px(i) - px(j), py(i) - py(j))
-        val palm = d(0, 9).coerceAtLeast(1e-4f)
+        // 3D (MediaPipe z is on the same scale as x), so fingers pointing at the camera
+        // aren't mistaken for curled ones.
+        fun pz(i: Int) = h.z(i) * a
+        fun d3(i: Int, j: Int): Float {
+            val dx = px(i) - px(j); val dy = py(i) - py(j); val dz = pz(i) - pz(j)
+            return kotlin.math.sqrt(dx * dx + dy * dy + dz * dz)
+        }
+        val palm = d3(0, 9).coerceAtLeast(1e-4f)
 
-        // Pose classification from finger geometry, normalised by palm size.
-        fun ext(tip: Int, pip: Int) = d(tip, 0) > d(pip, 0) * 1.12f
-        val index = ext(8, 6); val middle = ext(12, 10); val ring = ext(16, 14); val pinky = ext(20, 18)
-        val thumbOut = d(4, 5) > palm * 0.62f
-        val pinchRatio = d(4, 8) / palm
+        /** A finger is extended when its two segments are nearly in line (angle test). */
+        fun straight(a0: Int, a1: Int, b0: Int, b1: Int, minCos: Float): Boolean {
+            val ux = px(a1) - px(a0); val uy = py(a1) - py(a0); val uz = pz(a1) - pz(a0)
+            val vx = px(b1) - px(b0); val vy = py(b1) - py(b0); val vz = pz(b1) - pz(b0)
+            val n = kotlin.math.sqrt((ux * ux + uy * uy + uz * uz) * (vx * vx + vy * vy + vz * vz))
+            return n > 1e-9f && (ux * vx + uy * vy + uz * vz) / n > minCos
+        }
+        fun ext(mcp: Int, pip: Int, tip: Int) = straight(mcp, pip, pip, tip, 0.55f) && d3(tip, 0) > d3(pip, 0)
+        val index = ext(5, 6, 8); val middle = ext(9, 10, 12); val ring = ext(13, 14, 16); val pinky = ext(17, 18, 20)
+        val thumbOut = straight(2, 3, 3, 4, 0.6f) && d3(4, 5) > palm * 0.55f
+        val pinchRatio = d3(4, 8) / palm
+        // In a fist the thumb lies on the curled index finger, which looked like a pinch.
+        // A real pinch keeps the index fingertip away from the palm.
+        val indexReach = d3(8, 0) / palm
         val wasPinch = out.pose == HandPose.Pinch
         val pose = when {
-            pinchRatio < (if (wasPinch) 0.42f else 0.28f) -> HandPose.Pinch
+            pinchRatio < (if (wasPinch) 0.45f else 0.30f) && indexReach > 1.0f -> HandPose.Pinch
             thumbOut && !index && !middle && !ring && !pinky && py(4) < py(5) - palm * 0.35f -> HandPose.ThumbsUp
             !index && !middle && !ring && !pinky -> HandPose.Fist
             index && middle && ring && pinky -> HandPose.Open
@@ -363,10 +426,9 @@ class GestureEngine(private val sink: GestureSink) {
         out.score = h.score
         out.extended = (if (thumbOut) "T" else "-") + (if (index) "I" else "-") + (if (middle) "M" else "-") + (if (ring) "R" else "-") + (if (pinky) "P" else "-")
 
-        // Stable anchor: between the index knuckle and the thumb-index pinch point, so
-        // closing a pinch barely moves the cursor.
-        val ax = (px(5) + (px(4) + px(8)) / 2) / 2
-        val ay = (py(5) + (py(4) + py(8)) / 2) / 2
+        // Stable anchor: the palm centre. The old anchor used the thumb and index tips,
+        // which move when you pinch, so every pinch dragged the cursor (~300 px median).
+        val ax = palmX(h); val ay = palmY(h)
         val s = mapToScreen(ax, ay, out === hands[0])
         out.cursorX = s.x * sw; out.cursorY = s.y * sh
         out.rawCursorX = out.cursorX; out.rawCursorY = out.cursorY
@@ -395,7 +457,7 @@ class GestureEngine(private val sink: GestureSink) {
         val p = when {
             cal != null && cal.bodySpace == bodySpace -> cal.apply(bx, by)
             bodySpace -> Offset(0.5f + (bx - 0.35f) / 2.6f, (by + 1.25f) / 1.9f)
-            else -> Offset((ax / aspect - 0.15f) / 0.7f, (ay - 0.1f) / 0.7f)
+            else -> Offset((ax / aspect - 0.5f) / CAMERA_REGION_W + 0.5f, (ay - 0.45f) / CAMERA_REGION_H + 0.5f)
         }
         return Offset(p.x.coerceIn(-0.05f, 1.05f), p.y.coerceIn(-0.05f, 1.05f))
     }

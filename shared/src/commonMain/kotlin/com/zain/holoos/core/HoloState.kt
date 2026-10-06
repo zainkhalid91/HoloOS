@@ -172,7 +172,7 @@ class ListingCache(private val scope: CoroutineScope, private val source: com.za
 
 enum class EarthMode { Holo, Real }
 
-private const val DWELL_SECONDS = 1.0f
+private const val DWELL_SECONDS = 0.9f
 
 private const val LOG_HEADER = "t_ms,frame,src,cam_fps,pipe_ms,hands,body,pose,fingers,pinch,score,anchor_x,anchor_y,ref_x,ref_y,space," +
     "raw_cx,raw_cy,cx,cy,pred_x,pred_y,pinching,dragging,gestures,hover,top,top_p,grabbed,screen,transition,ui_fps,screen_px,event,detail"
@@ -337,7 +337,7 @@ class HoloOsState(private val scope: CoroutineScope) {
         val t = targets.at(hand.x, hand.y)
         if (t == null || (t.onTap == null && t.onDive == null)) { dwellBlockedId = null; return }
         if (t.id == dwellBlockedId) return
-        if (hand.speed < 220f) t.dwell += dt / DWELL_SECONDS else t.dwell = (t.dwell - dt * 2f).coerceAtLeast(0f)
+        t.dwell += dt / DWELL_SECONDS
         if (t.dwell >= 1f) {
             t.dwell = 0f; dwellBlockedId = t.id
             event("dwell-select", t.id)

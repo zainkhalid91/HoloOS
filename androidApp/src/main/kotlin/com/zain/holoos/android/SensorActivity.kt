@@ -24,6 +24,7 @@ import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -89,6 +90,7 @@ class SensorActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        useBack = intent.getStringExtra("camera")?.let { it != "front" } ?: prefs.getBoolean("back", true)
         setContent { SensorScreen() }
         Thread(::sendLoop, "holo-link").apply { isDaemon = true }.start()
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) start()
@@ -129,10 +131,19 @@ class SensorActivity : ComponentActivity() {
         }
     }
 
-    /** Highest frame rate the front camera offers, up to 60. */
+    /**
+     * The back camera is the default: a far better sensor (less noise in low light means
+     * steadier landmarks). The phone's screen then faces away, which is fine: it only
+     * shows a skeleton. Tap the screen to switch; the choice is remembered.
+     */
+    private var useBack by mutableStateOf(true)
+    private val prefs by lazy { getSharedPreferences("sensor", MODE_PRIVATE) }
+
+    /** Highest frame rate the chosen camera offers, up to 60. */
     private fun bestFpsRange(): Range<Int>? = runCatching {
         val cm = getSystemService(Context.CAMERA_SERVICE) as CameraManager
-        val id = cm.cameraIdList.first { cm.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_FRONT }
+        val facing = if (useBack) CameraCharacteristics.LENS_FACING_BACK else CameraCharacteristics.LENS_FACING_FRONT
+        val id = cm.cameraIdList.first { cm.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == facing }
         cm.getCameraCharacteristics(id).get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
             ?.filter { it.upper <= 60 }?.maxWithOrNull(compareBy({ it.upper }, { it.lower }))
     }.getOrNull()
@@ -149,8 +160,8 @@ class SensorActivity : ComponentActivity() {
             bestFpsRange()?.let { Camera2Interop.Extender(builder).setCaptureRequestOption(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
             val analysis = builder.build().also { it.setAnalyzer(analysisExecutor, ::analyze) }
             provider.unbindAll()
-            provider.bindToLifecycle(this, CameraSelector.DEFAULT_FRONT_CAMERA, analysis)
-            status = "Tracking · range ${bestFpsRange() ?: "default"} fps"
+            provider.bindToLifecycle(this, if (useBack) CameraSelector.DEFAULT_BACK_CAMERA else CameraSelector.DEFAULT_FRONT_CAMERA, analysis)
+            status = "${if (useBack) "Back" else "Front"} camera · range ${bestFpsRange() ?: "default"} fps"
         }, ContextCompat.getMainExecutor(this))
     }
 
@@ -235,9 +246,15 @@ class SensorActivity : ComponentActivity() {
         super.onDestroy()
     }
 
+    private fun switchCamera() {
+        useBack = !useBack
+        prefs.edit().putBoolean("back", useBack).apply()
+        bindCamera()
+    }
+
     @androidx.compose.runtime.Composable
     private fun SensorScreen() {
-        Box(Modifier.fillMaxSize().background(HoloColors.Void)) {
+        Box(Modifier.fillMaxSize().background(HoloColors.Void).clickable { switchCamera() }) {
             Canvas(Modifier.fillMaxSize()) {
                 @Suppress("UNUSED_VARIABLE") val tick = fps + inferMs + handCount
                 val a = frameW.toFloat() / frameH
@@ -255,7 +272,7 @@ class SensorActivity : ComponentActivity() {
                 BasicText("HOLO OS · SENSOR", style = holoText(18.sp, HoloColors.Cyan, spacing = 4.sp))
                 BasicText(if (linkUp) "LINKED TO PC OVER USB" else "WAITING FOR PC · START HOLOOS ON THE LAPTOP", style = holoText(12.sp, if (linkUp) HoloColors.Amber else HoloColors.Muted))
                 BasicText("${fps.toInt()} FPS · ${inferMs.toInt()} MS (${delegate.name}) · $handCount HANDS", style = holoText(12.sp, HoloColors.Text, glow = 0f))
-                BasicText(status.uppercase(), style = holoText(10.sp, HoloColors.Muted, glow = 0f))
+                BasicText(status.uppercase() + " · TAP TO SWITCH CAMERA", style = holoText(10.sp, HoloColors.Muted, glow = 0f))
             }
             BasicText(
                 "SKELETON ONLY · NO CAMERA IMAGE IS SHOWN, STORED OR SENT",
