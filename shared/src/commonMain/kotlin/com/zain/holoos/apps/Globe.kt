@@ -226,7 +226,7 @@ fun GlobeView() {
             val r = min(holo.size.width, holo.size.height) * 0.36f * cam.zoom
             cam.flying = false
             cam.angY = vx / r * 0.45f
-            cam.angX = vy / r * 0.45f
+            cam.angX = (if (holo.invertVertical) -vy else vy) / r * 0.45f
         }
         // A fist stops it right there.
         holo.screenHold = {

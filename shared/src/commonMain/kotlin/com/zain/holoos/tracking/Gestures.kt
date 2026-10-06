@@ -142,6 +142,10 @@ class HandView {
     var rawCursorX = 0f; var rawCursorY = 0f
     var score = 0f
     var extended = ""
+    /** Unit vector out of the back of the hand (screen x right, y down, z away from camera). */
+    var backX = 0f; var backY = 0f; var backZ = 0f
+    /** Mapped position before the screen-edge clamp: velocities use this. */
+    var freeX = 0f; var freeY = 0f
 }
 
 /**
@@ -252,6 +256,7 @@ class GestureEngine(private val sink: GestureSink) {
 
     private var frameNowMs = 0L
     private val lastRef = FloatArray(2); private var lastRefBody = false
+    private val lastFree = FloatArray(2)
     /** Increments once per processed camera frame (the logger writes one row per frame). */
     var processed = 0; private set
     val currentPose: HandPose get() = pose
@@ -321,11 +326,12 @@ class GestureEngine(private val sink: GestureSink) {
         for (i in 0..1) {
             val hv = hands[i]
             if (!hv.visible) { velValid[i] = false; continue }
+            // Unclamped: at the screen edge the clamped cursor stops, which cut swipes short.
             if (velValid[i]) {
-                handVx[i] = handVx[i] * 0.5f + (hv.rawCursorX - prevHX[i]) / dt * 0.5f
-                handVy[i] = handVy[i] * 0.5f + (hv.rawCursorY - prevHY[i]) / dt * 0.5f
+                handVx[i] = handVx[i] * 0.5f + (hv.freeX - prevHX[i]) / dt * 0.5f
+                handVy[i] = handVy[i] * 0.5f + (hv.freeY - prevHY[i]) / dt * 0.5f
             } else { handVx[i] = 0f; handVy[i] = 0f }
-            prevHX[i] = hv.rawCursorX; prevHY[i] = hv.rawCursorY; velValid[i] = true
+            prevHX[i] = hv.freeX; prevHY[i] = hv.freeY; velValid[i] = true
         }
 
         // Debounced pose: 3 consistent frames, except pinch which is immediate (hysteresis).
@@ -546,6 +552,17 @@ class GestureEngine(private val sink: GestureSink) {
         out.pose = pose
         out.isRight = h.isRight
         out.pinchRatio = pinchRatio
+        // Back-of-hand normal: (index knuckle − wrist) × (pinky knuckle − wrist). In the
+        // mirrored image this points out of the back of a right hand; flip for the left.
+        run {
+            val ux = px(5) - px(0); val uy = py(5) - py(0); val uz = pz(5) - pz(0)
+            val vx = px(17) - px(0); val vy = py(17) - py(0); val vz = pz(17) - pz(0)
+            var nx = uy * vz - uz * vy; var ny = uz * vx - ux * vz; var nz = ux * vy - uy * vx
+            val nl = kotlin.math.sqrt(nx * nx + ny * ny + nz * nz).coerceAtLeast(1e-6f)
+            val sgn = if (h.isRight) 1f else -1f
+            nx = nx / nl * sgn; ny = ny / nl * sgn; nz = nz / nl * sgn
+            out.backX = nx; out.backY = ny; out.backZ = nz
+        }
         out.score = h.score
         out.extended = (if (thumbOut) "T" else "-") + (if (index) "I" else "-") + (if (middle) "M" else "-") + (if (ring) "R" else "-") + (if (pinky) "P" else "-")
 
@@ -554,6 +571,7 @@ class GestureEngine(private val sink: GestureSink) {
         val ax = palmX(h); val ay = palmY(h)
         val s = mapToScreen(ax, ay, out === hands[0])
         out.cursorX = s.x * sw; out.cursorY = s.y * sh
+        out.freeX = lastFree[0] * sw; out.freeY = lastFree[1] * sh
         out.rawCursorX = out.cursorX; out.rawCursorY = out.cursorY
         out.anchorX = ax; out.anchorY = ay
         out.refX = lastRef[0]; out.refY = lastRef[1]; out.bodySpace = lastRefBody
@@ -582,6 +600,7 @@ class GestureEngine(private val sink: GestureSink) {
             bodySpace -> Offset(0.5f + (bx - 0.35f) / 2.6f, (by + 1.25f) / 1.9f)
             else -> Offset((ax / aspect - 0.5f) / CAMERA_REGION_W + 0.5f, (ay - 0.45f) / CAMERA_REGION_H + 0.5f)
         }
+        lastFree[0] = p.x; lastFree[1] = p.y
         return Offset(p.x.coerceIn(-0.05f, 1.05f), p.y.coerceIn(-0.05f, 1.05f))
     }
 
@@ -608,9 +627,11 @@ class GestureEngine(private val sink: GestureSink) {
     private var flungPeak = 0f
     private var strokeDecisionPeak = 0f
     private var strokeMinSincePeak = Float.MAX_VALUE
+    private var strokeBackX = 0f; private var strokeBackY = 0f; private var strokeBackN = 0
     // The previous meaningful stroke (swipe or ignored return) for return detection.
     private var prevX = 0f; private var prevY = 0f; private var prevPeak = 0f
     private var prevEnd = 0L; private var ignoredRun = 0
+    private var flingDirX = 0f; private var flingDirY = 0f
 
     /** Latest translator decision, e.g. "SWIPE ↗ 2.4K PX/S → SPIN". */
     var interpretation by mutableStateOf(""); private set
@@ -624,7 +645,9 @@ class GestureEngine(private val sink: GestureSink) {
     }
 
     private fun translateStrokes(t: Long, dt: Float, twoHandZooming: Boolean) {
-        val blocked = twoHandZooming || pinching || gripping
+        val bothMoving = hands[0].visible && hands[1].visible &&
+            hypot(handVx[0], handVy[0]) > STROKE_START && hypot(handVx[1], handVy[1]) > STROKE_START
+        val blocked = twoHandZooming || pinching || gripping || bothMoving
         // Which hand is moving? Keep following the stroke's hand while it lasts.
         var hand = -1; var speed = 0f
         if (strokeActive && strokeHand >= 0 && hands[strokeHand].visible) {
@@ -644,6 +667,7 @@ class GestureEngine(private val sink: GestureSink) {
                 strokeDx = 0f; strokeDy = 0f; strokePath = 0f; strokePeak = 0f
                 strokeFrames = 0; strokeOpen = 0; strokeDecided = false; strokeKind = ""; strokeSlowFrames = 0; flungPeak = 0f
                 strokeMinSincePeak = Float.MAX_VALUE
+                strokeBackX = 0f; strokeBackY = 0f; strokeBackN = 0
             } else return
         }
         if (hand < 0 || blocked) { endStroke(t); return }
@@ -660,8 +684,10 @@ class GestureEngine(private val sink: GestureSink) {
             strokeDx = 0f; strokeDy = 0f; strokePath = 0f; strokePeak = 0f
             strokeFrames = 0; strokeOpen = 0; strokeDecided = false; strokeKind = ""; strokeSlowFrames = 0; flungPeak = 0f
             strokeMinSincePeak = Float.MAX_VALUE
+            strokeBackX = 0f; strokeBackY = 0f; strokeBackN = 0
         }
         strokeDx += vxh * dt; strokeDy += vyh * dt; strokePath += speed * dt
+        strokeBackX += hands[hand].backX; strokeBackY += hands[hand].backY; strokeBackN++
         strokeFrames++
         if (hands[hand].pose == HandPose.Open) strokeOpen++
         if (speed > strokePeak) { strokePeak = speed; strokeMinSincePeak = speed } else strokeMinSincePeak = minOf(strokeMinSincePeak, speed)
@@ -671,29 +697,43 @@ class GestureEngine(private val sink: GestureSink) {
         if (!strokeDecided && (strokeFrames >= 3 || (strokeFrames >= 2 && speed < strokePeak * 0.6f))) {
             strokeDecided = true
             val len = hypot(strokeDx, strokeDy).coerceAtLeast(1e-3f)
-            val dirX = strokeDx / len; val dirY = strokeDy / len
+            var dirX = strokeDx / len; var dirY = strokeDy / len
             val straight = len / strokePath.coerceAtLeast(1e-3f)
             val open = strokeOpen.toFloat() / strokeFrames
+            // Back of the hand: when the hand is tilted, the back faces where the user means
+            // to swipe (the arm's arc bends the path; the hand's facing doesn't). A stroke
+            // led by the back is a swipe, one led by the palm is the hand coming back.
+            val bx = strokeBackX / strokeBackN.coerceAtLeast(1); val by = strokeBackY / strokeBackN.coerceAtLeast(1)
+            val bl = hypot(bx, by)
+            val lead = if (bl > 0.35f) (dirX * bx + dirY * by) / bl else 0f
+            val backLeads = lead > 0.3f
+            val palmLeads = lead < -0.3f
+            if (backLeads) { dirX = bx / bl; dirY = by / bl }
             // Return or reversal? Both look the same; the one you mean is the more forceful
             // one. An opposite stroke soon after the last one counts only if it's at least as
             // fast (compared at the same point in the stroke). Never more than two in a row
             // are ignored, so a direction change can't get stuck.
             strokeDecisionPeak = strokePeak
             val opposite = dirX * prevX + dirY * prevY < -0.5f
-            val isReturn = opposite && t - prevEnd < 900 && strokePeak < prevPeak && ignoredRun < 2
-            val deliberate = strokePeak > SWIPE_SPEED && straight > 0.7f && open >= 0.5f
+            val speedSaysReturn = opposite && t - prevEnd < 900 && strokePeak < prevPeak
+            val isReturn = ignoredRun < 2 && !backLeads && (palmLeads && t - prevEnd < 1200 || speedSaysReturn)
+            val deliberate = if (backLeads) strokePeak > SWIPE_SPEED * 0.8f && straight > 0.6f
+                else strokePeak > SWIPE_SPEED && straight > 0.7f && open >= 0.5f
+            val how = if (backLeads) " · BACK-HAND" else if (palmLeads) " · PALM-LED" else ""
             val dir = arrow(dirX, dirY)
             val k = "${(strokePeak / 100).toInt() / 10f}K PX/S"
             when {
                 isReturn -> {
                     strokeKind = "return"
                     sink.onReturnIgnored("swipe")
-                    interpret(t, "RETURN $dir · IGNORED (SLOWER THAN ${arrow(prevX, prevY)} · SWIPE HARDER TO REVERSE)")
+                    interpret(t, if (palmLeads) "RETURN $dir · IGNORED (PALM-LED: HAND COMING BACK)"
+                        else "RETURN $dir · IGNORED (SLOWER THAN ${arrow(prevX, prevY)} · SWIPE HARDER TO REVERSE)")
                 }
                 deliberate -> {
                     strokeKind = "swipe"
+                    flingDirX = dirX; flingDirY = dirY
                     flingFromStroke(t, dirX, dirY)
-                    interpret(t, "SWIPE $dir $k → SPIN")
+                    interpret(t, "SWIPE $dir $k$how → SPIN")
                 }
                 else -> {
                     strokeKind = "move"
@@ -706,9 +746,8 @@ class GestureEngine(private val sink: GestureSink) {
                 }
             }
         } else if (strokeDecided && strokeKind == "swipe" && strokePeak > flungPeak * 1.15f) {
-            // The swipe kept accelerating: upgrade the spin along the stroke's direction.
-            val len = hypot(strokeDx, strokeDy).coerceAtLeast(1e-3f)
-            flingFromStroke(t, strokeDx / len, strokeDy / len)
+            // The swipe kept accelerating: upgrade the spin along the decided direction.
+            flingFromStroke(t, flingDirX, flingDirY)
         }
 
         strokeSlowFrames = if (speed < maxOf(STROKE_END, strokePeak * 0.25f)) strokeSlowFrames + 1 else 0

@@ -175,7 +175,7 @@ enum class EarthMode { Holo, Real }
 private const val DWELL_SECONDS = 0.5f
 
 private const val LOG_HEADER = "t_ms,frame,src,cam_fps,pipe_ms,hands,body,pose,fingers,pinch,score,anchor_x,anchor_y,ref_x,ref_y,space," +
-    "raw_cx,raw_cy,cx,cy,pred_x,pred_y,pinching,dragging,gestures,hover,top,top_p,grabbed,screen,transition,ui_fps,screen_px,event,detail"
+    "raw_cx,raw_cy,cx,cy,pred_x,pred_y,pinching,dragging,gestures,hover,top,top_p,grabbed,screen,transition,ui_fps,back,screen_px,event,detail"
 
 /** Everything the UI tree needs, provided once through [LocalHolo]. */
 class HoloOsState(private val scope: CoroutineScope) {
@@ -224,6 +224,14 @@ class HoloOsState(private val scope: CoroutineScope) {
     var screenDrag: ((dx: Float, dy: Float) -> Unit)? = null
     /** Screens that consume open-hand swipes (fling, px/s) and "stop" fists. */
     var screenFling: ((vx: Float, vy: Float) -> Unit)? = null
+    /** Reverse the vertical spin direction for swipes (V key). Remembered across runs. */
+    var invertVertical by mutableStateOf(com.zain.holoos.tracking.loadSetting("invert-vertical")?.trim() != "false")
+        private set
+    fun toggleInvertVertical() {
+        invertVertical = !invertVertical
+        com.zain.holoos.tracking.saveSetting("invert-vertical", invertVertical.toString())
+        event("invert-vertical", invertVertical.toString())
+    }
     var screenHold: (() -> Unit)? = null
     var screenTap: ((at: Offset) -> Boolean)? = null
 
@@ -347,6 +355,7 @@ class HoloOsState(private val scope: CoroutineScope) {
             if (g.isPinching) "1" else "0", if (g.isDragging) "1" else "0", g.active.joinToString("+") { it.name },
             hoverId(), top?.id ?: "-", f3(top?.probability ?: 0f), grabbed?.id ?: "-",
             navigator.top.screen.title, if (navigator.transition != null) "1" else "0", fps.toString(),
+            "${f3(h.backX)} ${f3(h.backY)} ${f3(h.backZ)}",
             size.width.toInt().toString() + "x" + size.height.toInt().toString(), eventName, detail,
         )
         l.write(row.joinToString(",") { csv(it) })

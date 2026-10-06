@@ -114,7 +114,7 @@ fun Hud() {
         if (holo.debugOn) DebugPanel(holo, Modifier.align(Alignment.TopCenter).padding(top = 52.dp))
 
         BasicText(
-            "TAP OR SCROLL-ZOOM TO DIVE  ·  SCROLL OUT / ESC TO RISE  ·  H HOME  ·  P PREDICTION  ·  M SOUND  ·  G GLOBE  ·  C CALIBRATE  ·  D DEBUG  ·  CTRL+Q QUIT",
+            "TAP OR SCROLL-ZOOM TO DIVE  ·  SCROLL OUT / ESC TO RISE  ·  H HOME  ·  P PREDICTION  ·  M SOUND  ·  G GLOBE  ·  C CALIBRATE  ·  D DEBUG  ·  V VERTICAL ${if (holo.invertVertical) "REVERSED" else "NORMAL"}  ·  CTRL+Q QUIT",
             style = holoText(10.sp, HoloColors.Muted, glow = 0f),
             modifier = Modifier.align(Alignment.BottomCenter),
         )

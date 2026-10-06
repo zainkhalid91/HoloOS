@@ -138,6 +138,33 @@ class SwipeClutchTest {
         assertTrue(rec.spreads.any { it < 0f }, "a fast close after the return must zoom out: ${rec.spreads}")
     }
 
+    /** Open hand tilted so the back of the hand faces up (knuckles toward the camera). */
+    private fun tiltedHand(cy: Float): TrackedHand {
+        val base = openHand(0.5f).pts.copyOf()
+        for (i in 0 until 21) {
+            base[i * 3 + 1] = base[i * 3 + 1] - 0.5f + cy
+            if (i >= 5) base[i * 3 + 2] = -0.1f / aspect
+        }
+        return TrackedHand(true, 0.95f, base)
+    }
+
+    @Test fun palmLedReturnIsIgnoredEvenAtSameSpeed() {
+        val vys = ArrayList<Float>(); val ignored = ArrayList<String>()
+        val engine = GestureEngine(object : GestureSink by Recorder() {
+            override fun onFling(vx: Float, vy: Float) { vys += vy }
+            override fun onReturnIgnored(kind: String) { ignored += kind }
+        })
+        engine.flingClaimed = true
+        var t = 1_000_000L
+        val ys = List(15) { 0.6f } + List(6) { 0.6f - 0.05f * (it + 1) } + List(3) { 0.3f } + List(6) { 0.3f + 0.05f * (it + 1) } + List(10) { 0.6f }
+        ys.forEachIndexed { i, y ->
+            t += 33
+            engine.process(TrackFrame(i, t.toDouble(), t, 30f, 1280, 720, null, listOf(tiltedHand(y))), t, 1920f, 1080f)
+        }
+        assertTrue(vys.isNotEmpty() && vys.all { it < 0f }, "back-led upward swipe spins, palm-led return doesn't: $vys")
+        assertTrue("swipe" in ignored, "the palm-led stroke down is a return: $ignored")
+    }
+
     private fun still(x: Float, n: Int) = List(n) { x }
     private fun move(from: Float, to: Float, n: Int) = List(n) { from + (to - from) * (it + 1) / n }
 

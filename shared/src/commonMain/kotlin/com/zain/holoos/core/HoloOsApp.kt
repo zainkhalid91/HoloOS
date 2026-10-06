@@ -84,6 +84,7 @@ fun HoloOsApp(state: HoloOsState = rememberHoloOsState()) {
                         Key.H -> { state.navigator.home(); true }
                         Key.M -> { state.toggleMute(); true }
                         Key.D -> { state.debugOn = !state.debugOn; true }
+                        Key.V -> { state.toggleInvertVertical(); true }
                         Key.C -> { if (state.navigator.top.screen != HandsScreen) state.navigator.push(HandsScreen, androidx.compose.ui.geometry.Rect(state.size.width / 2 - 60f, state.size.height / 2 - 60f, state.size.width / 2 + 60f, state.size.height / 2 + 60f)); true }
                         Key.G -> { state.earthMode = if (state.earthMode == EarthMode.Real) EarthMode.Holo else EarthMode.Real; true }
                         else -> false

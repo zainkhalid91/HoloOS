@@ -74,8 +74,12 @@ half4 main(float2 fc) {
 
     float ocean = clamp((day.b - max(day.r, day.g) * 0.9) * 6.0, 0.0, 1.0);
     float3 n = float3(d.x, d.y, z);
-    float3 h = normalize(sunView + float3(0.0, 0.0, 1.0));
-    float spec = pow(max(dot(n, h), 0.0), 60.0) * ocean * dayAmt;
+    // Half vector between sun and viewer. When the sun is right behind the globe it is
+    // ~zero and normalize() returned NaN: a black hole in the middle of the Earth.
+    float3 hv = sunView + float3(0.0, 0.0, 1.0);
+    float hl = length(hv);
+    float spec = 0.0;
+    if (hl > 0.001) spec = pow(max(dot(n, hv / hl), 0.0), 60.0) * ocean * dayAmt;
     col += float3(1.0, 0.95, 0.85) * spec * 0.7;
 
     float rim = pow(1.0 - z, 2.5);
