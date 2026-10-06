@@ -154,7 +154,12 @@ fun GlobeView() {
         holo.burst(Offset(proj.x[i], proj.y[i]), warm = true)
     }
 
-    holo.screenTap = { at -> val i = nearestCity(proj, at, 30f); if (i >= 0) { select(i); true } else false }
+    holo.screenTap = { at ->
+        // Prefer the city that is currently highlighted, so a tap selects what you see.
+        val i = hover[0].takeIf { it >= 0 } ?: nearestCity(proj, at, 60f)
+        holo.event("city-tap", if (i >= 0) worldCities[i].name else "miss @ ${at.x.toInt()},${at.y.toInt()}")
+        if (i >= 0) { select(i); true } else false
+    }
 
     Box(Modifier.fillMaxSize()) {
         Canvas(
@@ -182,7 +187,8 @@ fun GlobeView() {
             cam.step(t)
             val c = Offset(size.width * 0.42f, size.height * 0.54f)
             val r = min(size.width, size.height) * 0.36f * cam.zoom
-            val h = if (holo.hand.visible) nearestCity(proj, holo.hand.position, 18f) else -1
+            // Hand cursors are coarser than a mouse: a 40 px catch radius for hover.
+            val h = if (holo.hand.visible) nearestCity(proj, holo.hand.position, 40f) else -1
             if (h != hover[0]) { hover[0] = h; if (h >= 0) holo.sfx(Sfx.Hover, pitch = 1.2f) }
             val mark = kotlin.time.TimeSource.Monotonic.markNow()
             drawGlobe(holo, cam, c, r, t, selected, h, proj, measurer, labels)

@@ -192,6 +192,7 @@ class GestureEngine(private val sink: GestureSink) {
     private var bodyRatio = 0f; private var useBody = false
     private var outlierFrames = 0
     private var gripping = false
+    private var fistFrames = 0
     private var twoPinchSince = 0L
     private var lastCursorT = 0L
     private var lastCx = 0f; private var lastCy = 0f
@@ -330,7 +331,8 @@ class GestureEngine(private val sink: GestureSink) {
         }
 
         // Closed hand grabs: the session log showed fists used as the natural grab gesture.
-        val grip = pose == HandPose.Fist && !pinching
+        fistFrames = if (pose == HandPose.Fist) fistFrames + 1 else 0
+        val grip = fistFrames >= 3 && !pinching
         when {
             grip && !gripping -> { gripping = true; sink.onGrip(true) }
             grip -> { if (moveX != 0f || moveY != 0f) sink.onDrag(moveX, moveY) }
