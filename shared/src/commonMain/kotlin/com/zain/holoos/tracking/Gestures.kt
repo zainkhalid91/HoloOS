@@ -444,7 +444,9 @@ class GestureEngine(private val sink: GestureSink) {
                     // Burst starts: is this the hand travelling back after the last swipe?
                     burstDirX = dx; burstDirY = dy
                     val opposite = dx * lastStrokeDirX + dy * lastStrokeDirY < -0.3f
-                    burstIgnored = opposite && t - lastStrokeEnd < 700 && bestSpeed < lastStrokePeak * 1.6f
+                    // Log: fast back-and-forth returns reached 1.6× the swipe speed, so the
+                    // override needs a clearly stronger stroke.
+                    burstIgnored = opposite && t - lastStrokeEnd < 900 && bestSpeed < lastStrokePeak * 2.2f
                     if (burstIgnored) sink.onReturnIgnored("swipe")
                 }
                 if (fastFrames >= 2 && !burstIgnored && bestSpeed > burstPeak * 1.15f) {

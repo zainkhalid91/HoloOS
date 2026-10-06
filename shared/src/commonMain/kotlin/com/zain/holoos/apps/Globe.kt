@@ -174,7 +174,9 @@ fun GlobeView() {
 
     holo.screenTap = { at ->
         // Prefer the city that is currently highlighted, so a tap selects what you see.
-        val i = hover[0].takeIf { it >= 0 } ?: nearestCity(proj, at, 60f)
+        // Log: 13/14 hand taps landed >60 px from any city (often over sea): fall back to
+        // the nearest visible city within 140 px.
+        val i = hover[0].takeIf { it >= 0 } ?: nearestCity(proj, at, 140f)
         holo.event("city-tap", if (i >= 0) worldCities[i].name else "miss @ ${at.x.toInt()},${at.y.toInt()}")
         if (i >= 0) { select(i); true } else false
     }
