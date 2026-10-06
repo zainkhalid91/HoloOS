@@ -246,6 +246,7 @@ class HoloOsState(private val scope: CoroutineScope) {
         }
         override fun onHold() { event("hold", ""); screenHold?.invoke() }
         override fun onReturnIgnored(kind: String) { event("return-ignored", kind) }
+        override fun onInterpretation(text: String) { event("read", text) }
         override fun onSpread(amount: Float, at: Offset) {
             event("spread", ((amount * 100).toInt() / 100f).toString())
             screenZoom?.invoke(amount, at)

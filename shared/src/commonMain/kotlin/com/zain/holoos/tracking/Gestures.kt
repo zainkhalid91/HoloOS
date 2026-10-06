@@ -114,6 +114,8 @@ interface GestureSink {
     fun onSpread(amount: Float, at: Offset)
     /** A movement recognised as the hand travelling back after a stroke (ignored). */
     fun onReturnIgnored(kind: String)
+    /** Human-readable decision from the gesture translator. */
+    fun onInterpretation(text: String) {}
     fun onZoom(amount: Float, at: Offset)
     fun onBack()
     fun onHome()
@@ -147,8 +149,11 @@ class HandView {
  * (more hand movement per screen width). Tuned down after "too fast to control".
  */
 private const val CAMERA_REGION_W = 0.62f
-/** Open-hand speed (screen px/s) that counts as a deliberate swipe. */
-private const val SWIPE_SPEED = 1800f
+/** Peak open-hand speed (screen px/s) for a straight stroke to count as a swipe. */
+private const val SWIPE_SPEED = 1400f
+/** A stroke starts above this speed and ends after two frames below [STROKE_END]. */
+private const val STROKE_START = 900f
+private const val STROKE_END = 450f
 private const val CAMERA_REGION_H = 0.58f
 
 class GestureEngine(private val sink: GestureSink) {
@@ -225,6 +230,8 @@ class GestureEngine(private val sink: GestureSink) {
     private var spreadEpisodeIgnored = false
     private var spreadQuietFrames = 0
     private var lastSpreadSign = 0; private var lastSpreadEnd = 0L
+    private var spreadDecided = false; private var spreadFrames = 0; private var spreadPeak = 0f
+    private var lastSpreadPeak = 0f; private var spreadIgnoredRun = 0; private var spreadDecisionPeak = 0f
     private var secondFistFrames = 0
     private var twoPinchSince = 0L
     private var lastCursorT = 0L
@@ -400,15 +407,25 @@ class GestureEngine(private val sink: GestureSink) {
                 val sign = if (rate > 600f) 1 else if (rate < -600f) -1 else 0
                 if (sign != 0 && sign == spreadSign) {
                     if (spreadEpisode != sign) {
-                        // A new zoom stroke begins. Opposite to the last one and soon after it?
-                        // Then the hands are just travelling back: ignore this stroke.
                         if (spreadEpisode != 0) endSpread(t)
-                        spreadEpisode = sign
-                        spreadEpisodeIgnored = lastSpreadSign == -sign && t - lastSpreadEnd < 800
-                        if (spreadEpisodeIgnored) sink.onReturnIgnored(if (sign > 0) "spread-apart" else "spread-together")
+                        spreadEpisode = sign; spreadDecided = false; spreadFrames = 0; spreadPeak = 0f; spreadEpisodeIgnored = false
                     }
                     spreadQuietFrames = 0
-                    if (!spreadEpisodeIgnored) {
+                    spreadFrames++
+                    spreadPeak = maxOf(spreadPeak, abs(rate))
+                    if (!spreadDecided && spreadFrames >= 2) {
+                        // Same rule as swipes: opposite to the last zoom stroke, soon after it,
+                        // and slower → the hands are travelling back. At most two in a row.
+                        spreadDecided = true
+                        spreadDecisionPeak = spreadPeak
+                        val opposite = lastSpreadSign == -sign && t - lastSpreadEnd < 800
+                        spreadEpisodeIgnored = opposite && spreadPeak < lastSpreadPeak && spreadIgnoredRun < 2
+                        if (spreadEpisodeIgnored) {
+                            sink.onReturnIgnored(if (sign > 0) "spread-apart" else "spread-together")
+                            interpret(t, "HANDS ${if (sign > 0) "APART" else "TOGETHER"} · IGNORED (SLOWER RETURN · MOVE FASTER TO REVERSE)")
+                        } else interpret(t, "HANDS ${if (sign > 0) "APART → ZOOM IN" else "TOGETHER → ZOOM OUT"}")
+                    }
+                    if (spreadDecided && !spreadEpisodeIgnored) {
                         val mid = Offset((hands[0].rawCursorX + hands[1].rawCursorX) / 2, (hands[0].rawCursorY + hands[1].rawCursorY) / 2)
                         sink.onSpread(((openDistSmooth / openDist - 1f) * 1.2f).coerceIn(-0.15f, 0.15f), mid)
                         now += Gesture.TwoHandZoom
@@ -425,44 +442,7 @@ class GestureEngine(private val sink: GestureSink) {
 
         if (pose == HandPose.Open) now += Gesture.OpenPalm
         if (flingClaimed) {
-            // Either hand: a fast open-hand swipe spins the globe along the swipe direction.
-            // Repositioning the hand reached 1,359 px/s (75th pct), so swipes need 1,800+
-            // for two frames. One fling per swipe; later frames only upgrade a faster swipe.
-            var best = -1; var bestSpeed = 0f
-            if (!twoHandZooming && !pinching && !gripping) {
-                for (i in 0..1) {
-                    val hv = hands[i]
-                    if (!hv.visible || hv.pose != HandPose.Open) continue
-                    val sp = hypot(handVx[i], handVy[i])
-                    if (sp > bestSpeed) { bestSpeed = sp; best = i }
-                }
-            }
-            if (best >= 0 && bestSpeed > SWIPE_SPEED) {
-                fastFrames++
-                val dx = handVx[best] / bestSpeed; val dy = handVy[best] / bestSpeed
-                if (fastFrames == 2) {
-                    // Burst starts: is this the hand travelling back after the last swipe?
-                    burstDirX = dx; burstDirY = dy
-                    val opposite = dx * lastStrokeDirX + dy * lastStrokeDirY < -0.3f
-                    // Log: fast back-and-forth returns reached 1.6× the swipe speed, so the
-                    // override needs a clearly stronger stroke.
-                    burstIgnored = opposite && t - lastStrokeEnd < 900 && bestSpeed < lastStrokePeak * 2.2f
-                    if (burstIgnored) sink.onReturnIgnored("swipe")
-                }
-                if (fastFrames >= 2 && !burstIgnored && bestSpeed > burstPeak * 1.15f) {
-                    burstPeak = bestSpeed; lastFlingT = t
-                    sink.onFling(handVx[best], handVy[best])
-                }
-                if (fastFrames >= 2 && !burstIgnored) now += Gesture.Swipe
-            } else if (bestSpeed < SWIPE_SPEED * 0.6f) {
-                if (fastFrames >= 2) {
-                    // Burst ended. A real swipe becomes the reference; an ignored return
-                    // stroke only refreshes the time, so the next forward swipe is allowed.
-                    if (!burstIgnored) { lastStrokeDirX = burstDirX; lastStrokeDirY = burstDirY; lastStrokePeak = burstPeak }
-                    lastStrokeEnd = t
-                }
-                fastFrames = 0; burstPeak = 0f; burstIgnored = false
-            }
+            translateStrokes(t, dt, twoHandZooming)
         } else if (pose == HandPose.Open && t > swipeCooldownUntil && vx < -2.0f * screenW && abs(vx) > 2f * abs(vy)) {
             swipeCooldownUntil = t + 800
             sink.onBack()
@@ -492,7 +472,7 @@ class GestureEngine(private val sink: GestureSink) {
         hands.forEach { it.visible = false }
         if (pinching) { pinching = false; sink.onPress(false) }
         if (gripping) { gripping = false; sink.onGrip(false) }
-        twoPinchSince = 0L; openDist = 0f; openDistSmooth = 0f; spreadSign = 0; fastFrames = 0; burstPeak = 0f; velValid[0] = false; velValid[1] = false; secondFistFrames = 0
+        twoPinchSince = 0L; openDist = 0f; openDistSmooth = 0f; spreadSign = 0; fastFrames = 0; burstPeak = 0f; strokeActive = false; velValid[0] = false; velValid[1] = false; secondFistFrames = 0
         dragging = false; twoHandDist = 0f; pose = HandPose.None; holdPose = HandPose.None; holdProgress = 0f
         fx.reset(); fy.reset(); lastCursorT = 0L; lastPrimaryAx = -1f; outlierFrames = 0
         if (active.isNotEmpty()) active = emptySet()
@@ -605,9 +585,163 @@ class GestureEngine(private val sink: GestureSink) {
         return Offset(p.x.coerceIn(-0.05f, 1.05f), p.y.coerceIn(-0.05f, 1.05f))
     }
 
+    // ---------------------------------------------------------------- gesture translator
+    /**
+     * Reads hand motion as whole strokes instead of single fast frames. A stroke starts
+     * when a hand speeds up and ends when it settles; while it runs we collect its
+     * direction, straightness, peak speed and hand pose, then decide what it *means*:
+     *
+     *  - SWIPE   straight, open hand, fast enough → spin, at the stroke's own angle.
+     *  - RETURN  the first opposite stroke right after a swipe → the hand getting ready
+     *            again, ignored. Only one per swipe, so you can never get stuck.
+     *  - MOVE    slow or curved → just repositioning, no action.
+     *
+     * Every decision is published in [interpretation] so the HUD can show what was read.
+     */
+    private var strokeActive = false
+    private var strokeHand = -1
+    private var strokeStart = 0L
+    private var strokeDx = 0f; private var strokeDy = 0f; private var strokePath = 0f
+    private var strokePeak = 0f; private var strokeFrames = 0; private var strokeOpen = 0
+    private var strokeDecided = false; private var strokeKind = ""
+    private var strokeSlowFrames = 0
+    private var flungPeak = 0f
+    private var strokeDecisionPeak = 0f
+    private var strokeMinSincePeak = Float.MAX_VALUE
+    // The previous meaningful stroke (swipe or ignored return) for return detection.
+    private var prevX = 0f; private var prevY = 0f; private var prevPeak = 0f
+    private var prevEnd = 0L; private var ignoredRun = 0
+
+    /** Latest translator decision, e.g. "SWIPE ↗ 2.4K PX/S → SPIN". */
+    var interpretation by mutableStateOf(""); private set
+    var interpretationAtMs = 0L; private set
+
+    private fun interpret(t: Long, text: String) { interpretation = text; interpretationAtMs = t; sink.onInterpretation(text) }
+
+    private fun arrow(x: Float, y: Float): String {
+        val a = (kotlin.math.atan2(y, x) * 180f / PI.toFloat() + 360f + 22.5f) % 360f
+        return arrayOf("→", "↘", "↓", "↙", "←", "↖", "↑", "↗")[(a / 45f).toInt().coerceIn(0, 7)]
+    }
+
+    private fun translateStrokes(t: Long, dt: Float, twoHandZooming: Boolean) {
+        val blocked = twoHandZooming || pinching || gripping
+        // Which hand is moving? Keep following the stroke's hand while it lasts.
+        var hand = -1; var speed = 0f
+        if (strokeActive && strokeHand >= 0 && hands[strokeHand].visible) {
+            hand = strokeHand; speed = hypot(handVx[hand], handVy[hand])
+        } else {
+            for (i in 0..1) {
+                val hv = hands[i]
+                if (!hv.visible || hv.pose == HandPose.Fist || hv.pose == HandPose.Pinch) continue
+                val sp = hypot(handVx[i], handVy[i])
+                if (sp > speed) { speed = sp; hand = i }
+            }
+        }
+
+        if (!strokeActive) {
+            if (!blocked && hand >= 0 && speed > STROKE_START) {
+                strokeActive = true; strokeHand = hand; strokeStart = t
+                strokeDx = 0f; strokeDy = 0f; strokePath = 0f; strokePeak = 0f
+                strokeFrames = 0; strokeOpen = 0; strokeDecided = false; strokeKind = ""; strokeSlowFrames = 0; flungPeak = 0f
+                strokeMinSincePeak = Float.MAX_VALUE
+            } else return
+        }
+        if (hand < 0 || blocked) { endStroke(t); return }
+
+        val vxh = handVx[hand]; val vyh = handVy[hand]
+        // The hand reversed without pausing: that's the end of this stroke and the start of
+        // a new one (otherwise a swipe and its return merge into one stroke).
+        // Likewise when the hand slowed right down and then speeds up again (a short pause
+        // between two strokes): two strokes, not one long one.
+        val reaccelerated = strokeFrames >= 3 && strokeMinSincePeak < strokePeak * 0.5f && speed > maxOf(STROKE_START, strokeMinSincePeak * 2.5f)
+        if ((strokeFrames >= 2 && vxh * strokeDx + vyh * strokeDy < 0f && speed > STROKE_START) || reaccelerated) {
+            endStroke(t)
+            strokeActive = true; strokeHand = hand; strokeStart = t
+            strokeDx = 0f; strokeDy = 0f; strokePath = 0f; strokePeak = 0f
+            strokeFrames = 0; strokeOpen = 0; strokeDecided = false; strokeKind = ""; strokeSlowFrames = 0; flungPeak = 0f
+            strokeMinSincePeak = Float.MAX_VALUE
+        }
+        strokeDx += vxh * dt; strokeDy += vyh * dt; strokePath += speed * dt
+        strokeFrames++
+        if (hands[hand].pose == HandPose.Open) strokeOpen++
+        if (speed > strokePeak) { strokePeak = speed; strokeMinSincePeak = speed } else strokeMinSincePeak = minOf(strokeMinSincePeak, speed)
+
+        // Decide once there's enough of the stroke to judge (3 frames ≈ 100 ms), or as
+        // soon as it starts to slow down.
+        if (!strokeDecided && (strokeFrames >= 3 || (strokeFrames >= 2 && speed < strokePeak * 0.6f))) {
+            strokeDecided = true
+            val len = hypot(strokeDx, strokeDy).coerceAtLeast(1e-3f)
+            val dirX = strokeDx / len; val dirY = strokeDy / len
+            val straight = len / strokePath.coerceAtLeast(1e-3f)
+            val open = strokeOpen.toFloat() / strokeFrames
+            // Return or reversal? Both look the same; the one you mean is the more forceful
+            // one. An opposite stroke soon after the last one counts only if it's at least as
+            // fast (compared at the same point in the stroke). Never more than two in a row
+            // are ignored, so a direction change can't get stuck.
+            strokeDecisionPeak = strokePeak
+            val opposite = dirX * prevX + dirY * prevY < -0.5f
+            val isReturn = opposite && t - prevEnd < 900 && strokePeak < prevPeak && ignoredRun < 2
+            val deliberate = strokePeak > SWIPE_SPEED && straight > 0.7f && open >= 0.5f
+            val dir = arrow(dirX, dirY)
+            val k = "${(strokePeak / 100).toInt() / 10f}K PX/S"
+            when {
+                isReturn -> {
+                    strokeKind = "return"
+                    sink.onReturnIgnored("swipe")
+                    interpret(t, "RETURN $dir · IGNORED (SLOWER THAN ${arrow(prevX, prevY)} · SWIPE HARDER TO REVERSE)")
+                }
+                deliberate -> {
+                    strokeKind = "swipe"
+                    flingFromStroke(t, dirX, dirY)
+                    interpret(t, "SWIPE $dir $k → SPIN")
+                }
+                else -> {
+                    strokeKind = "move"
+                    val why = when {
+                        straight <= 0.7f -> "CURVED"
+                        open < 0.5f -> "HAND NOT OPEN"
+                        else -> "TOO SLOW"
+                    }
+                    interpret(t, "MOVE $dir · NO ACTION ($why)")
+                }
+            }
+        } else if (strokeDecided && strokeKind == "swipe" && strokePeak > flungPeak * 1.15f) {
+            // The swipe kept accelerating: upgrade the spin along the stroke's direction.
+            val len = hypot(strokeDx, strokeDy).coerceAtLeast(1e-3f)
+            flingFromStroke(t, strokeDx / len, strokeDy / len)
+        }
+
+        strokeSlowFrames = if (speed < maxOf(STROKE_END, strokePeak * 0.25f)) strokeSlowFrames + 1 else 0
+        if (strokeSlowFrames >= 2) endStroke(t)
+    }
+
+    /** Spin velocity follows the stroke's overall direction (any angle) and its peak speed. */
+    private fun flingFromStroke(t: Long, dirX: Float, dirY: Float) {
+        flungPeak = strokePeak
+        lastFlingT = t
+        sink.onFling(dirX * strokePeak, dirY * strokePeak)
+    }
+
+    private fun endStroke(t: Long) {
+        if (!strokeActive) return
+        if (strokeKind == "swipe" || strokeKind == "return") {
+            val len = hypot(strokeDx, strokeDy).coerceAtLeast(1e-3f)
+            prevX = strokeDx / len; prevY = strokeDy / len
+            prevPeak = strokeDecisionPeak; prevEnd = t
+            ignoredRun = if (strokeKind == "return") ignoredRun + 1 else 0
+        }
+        strokeActive = false; strokeHand = -1
+    }
+
     private fun endSpread(t: Long) {
-        if (!spreadEpisodeIgnored) lastSpreadSign = spreadEpisode
+        // One ignored return per zoom stroke: after it, the opposite direction is
+        // deliberate (previously each ignore extended the block and zoom got stuck).
+        if (spreadDecided) {
+            lastSpreadSign = spreadEpisode; lastSpreadPeak = spreadDecisionPeak
+            spreadIgnoredRun = if (spreadEpisodeIgnored) spreadIgnoredRun + 1 else 0
+        }
         lastSpreadEnd = t
+        spreadDecided = false
         spreadEpisode = 0; spreadEpisodeIgnored = false; spreadQuietFrames = 0
     }
 

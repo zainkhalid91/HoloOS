@@ -12,7 +12,7 @@ interface EarthRenderer {
      * @param sun world-space unit vector to the sun; [sunView] the same in screen space
      * (used for the ocean glint). Draw the brush into a circle of radius `r * 1.15`.
      */
-    fun brush(cx: Float, cy: Float, r: Float, yaw: Float, pitch: Float, sun: FloatArray, sunView: FloatArray): Brush
+    fun brush(cx: Float, cy: Float, r: Float, m: FloatArray, sun: FloatArray, sunView: FloatArray): Brush
 }
 
 /** Null when the platform can't run runtime shaders (Android < 13): fall back to HOLO. */
@@ -41,7 +41,9 @@ uniform shader dayTex;
 uniform shader nightTex;
 uniform float2 center;
 uniform float radius;
-uniform float2 rot;
+uniform float3 r0;
+uniform float3 r1;
+uniform float3 r2;
 uniform float3 sun;
 uniform float3 sunView;
 uniform float2 texSize;
@@ -56,12 +58,9 @@ half4 main(float2 fc) {
         return half4(half3(0.30, 0.62, 1.0) * g, g);
     }
     float z = sqrt(1.0 - r2);
-    float cy = cos(rot.x); float sy = sin(rot.x);
-    float cp = cos(rot.y); float sp = sin(rot.y);
-    float wy = d.y * cp + z * sp;
-    float z1 = -d.y * sp + z * cp;
-    float wx = d.x * cy - z1 * sy;
-    float wz = d.x * sy + z1 * cy;
+    // Screen normal back to world: the matrix is orthonormal, so the inverse is its transpose.
+    float3 w = r0 * d.x + r1 * d.y + r2 * z;
+    float wx = w.x; float wy = w.y; float wz = w.z;
     float lat = asin(clamp(-wy, -1.0, 1.0));
     float lon = atan(wx, wz);
     float2 uv = float2((lon + PI) / (2.0 * PI) * texSize.x, (PI * 0.5 - lat) / PI * texSize.y);

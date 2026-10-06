@@ -101,6 +101,14 @@ fun GesturePanel(holo: HoloOsState, modifier: Modifier = Modifier) {
                     style = holoText(9.sp, HoloColors.Muted, glow = 0f, spacing = 1.sp),
                 )
             }
+            if (g != null && g.interpretation.isNotEmpty()) {
+                val fresh = holo.timeMs == 0L || com.zain.holoos.geo.epochMillis() - g.interpretationAtMs < 2500
+                BasicText(
+                    "READ: ${g.interpretation}",
+                    style = holoText(9.sp, if (fresh) HoloColors.Amber else HoloColors.Muted, glow = if (fresh) 6f else 0f, spacing = 1.sp),
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
             Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 SkeletonView(holo, Modifier.size(104.dp, 132.dp))

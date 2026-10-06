@@ -89,6 +89,55 @@ class SwipeClutchTest {
         assertTrue(rec.spreads.any { it < 0f }, "closing the hands after a pause should zoom out: ${rec.spreads}")
     }
 
+    @Test fun reversingIsNeverStuck() {
+        // Swipe right, hand drifts back left (slower → ignored), then the user really swipes
+        // left at full speed: that must spin left.
+        val rec = run(
+            still(0.3f, 15) + move(0.3f, 0.6f, 6) + still(0.6f, 3) +
+                move(0.6f, 0.4f, 6) + still(0.4f, 3) + move(0.4f, 0.1f, 6) + still(0.1f, 10),
+        )
+        assertEquals(1, rec.ignored.count { it == "swipe" }, "only the slow return is ignored: ${rec.ignored}")
+        assertTrue(rec.flings.any { it < 0f }, "the full-speed leftward swipe must spin left: ${rec.flings}")
+    }
+
+    @Test fun neverMoreThanTwoIgnoredInARow() {
+        // Right swipe, then three slower left strokes: the third must get through.
+        val rec = run(
+            still(0.3f, 15) + move(0.3f, 0.7f, 6) + still(0.7f, 3) +
+                move(0.7f, 0.55f, 6) + still(0.55f, 3) + move(0.55f, 0.4f, 6) + still(0.4f, 3) + move(0.4f, 0.25f, 6) + still(0.25f, 10),
+        )
+        assertTrue(rec.flings.any { it < 0f }, "after two ignored strokes the next one counts: ${rec.flings} ${rec.ignored}")
+    }
+
+    @Test fun diagonalSwipeKeepsItsAngle() {
+        val rec = Recorder()
+        val engine = GestureEngine(object : GestureSink by rec {
+            override fun onFling(vx: Float, vy: Float) { rec.flings += vx; diag += vy / vx }
+        })
+        engine.flingClaimed = true
+        var t = 1_000_000L
+        val path = List(15) { 0.3f to 0.4f } + List(6) { (0.3f + 0.05f * (it + 1)) to (0.4f + 0.05f * (it + 1)) } + List(10) { 0.6f to 0.7f }
+        path.forEachIndexed { i, (x, y) ->
+            t += 33
+            val h = openHand(x).let { hh -> TrackedHand(true, 0.95f, FloatArray(63) { k -> if (k % 3 == 1) hh.pts[k] - 0.5f + y else hh.pts[k] }) }
+            engine.process(TrackFrame(i, t.toDouble(), t, 30f, 1280, 720, null, listOf(h)), t, 1920f, 1080f)
+        }
+        assertTrue(diag.isNotEmpty(), "diagonal swipe should fling")
+        // Equal normalised motion in x and y: screen ratio ≈ (0.05·1080/0.58) / (0.05·1920/0.62) ≈ 0.6
+        assertTrue(diag.all { it > 0.3f }, "the spin keeps the diagonal angle, not one axis: $diag")
+    }
+    private val diag = ArrayList<Float>()
+
+    @Test fun zoomReversingIsNeverStuck() {
+        // Zoom in, hands come back slowly (ignored), then close them fast: that zooms out.
+        val rec = runTwo(
+            spreadStill(0.06f, 15) + spreadMove(0.06f, 0.26f, 6) + spreadStill(0.26f, 3) +
+                spreadMove(0.26f, 0.08f, 6) + spreadStill(0.08f, 3) +
+                spreadMove(0.08f, 0.28f, 4) + spreadStill(0.28f, 3) + spreadMove(0.28f, 0.06f, 4) + spreadStill(0.06f, 10),
+        )
+        assertTrue(rec.spreads.any { it < 0f }, "a fast close after the return must zoom out: ${rec.spreads}")
+    }
+
     private fun still(x: Float, n: Int) = List(n) { x }
     private fun move(from: Float, to: Float, n: Int) = List(n) { from + (to - from) * (it + 1) / n }
 

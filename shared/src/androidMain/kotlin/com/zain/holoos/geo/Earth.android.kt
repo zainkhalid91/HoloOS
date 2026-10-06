@@ -21,10 +21,12 @@ private class AgslEarth(day: ImageBitmap, night: ImageBitmap) : EarthRenderer {
     private fun tex(b: ImageBitmap) = BitmapShader(b.asAndroidBitmap(), Shader.TileMode.REPEAT, Shader.TileMode.CLAMP)
         .apply { filterMode = BitmapShader.FILTER_MODE_LINEAR }
 
-    override fun brush(cx: Float, cy: Float, r: Float, yaw: Float, pitch: Float, sun: FloatArray, sunView: FloatArray): Brush {
+    override fun brush(cx: Float, cy: Float, r: Float, m: FloatArray, sun: FloatArray, sunView: FloatArray): Brush {
         shader.setFloatUniform("center", cx, cy)
         shader.setFloatUniform("radius", r)
-        shader.setFloatUniform("rot", yaw, pitch)
+        shader.setFloatUniform("r0", m[0], m[1], m[2])
+        shader.setFloatUniform("r1", m[3], m[4], m[5])
+        shader.setFloatUniform("r2", m[6], m[7], m[8])
         shader.setFloatUniform("sun", sun[0], sun[1], sun[2])
         shader.setFloatUniform("sunView", sunView[0], sunView[1], sunView[2])
         return ShaderBrush(shader)
