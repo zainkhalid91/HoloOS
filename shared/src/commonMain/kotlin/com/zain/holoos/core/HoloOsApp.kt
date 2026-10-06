@@ -27,6 +27,7 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.utf16CodePoint
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerType
@@ -41,6 +42,7 @@ import com.zain.holoos.holo.HoloColors
 import com.zain.holoos.holo.glowCircle
 import com.zain.holoos.holo.glowDot
 import com.zain.holoos.holo.glowLine
+import com.zain.holoos.holo.glowPath
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
@@ -68,10 +70,16 @@ fun HoloOsApp(state: HoloOsState = rememberHoloOsState()) {
                 .focusable()
                 .onPreviewKeyEvent { e ->
                     if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                    if (state.navigator.top.screen == CalculatorScreen) {
+                        val k = calculatorKey(e.key, e.utf16CodePoint)
+                        if (k != null) { com.zain.holoos.apps.pressWithSound(state, k); return@onPreviewKeyEvent true }
+                    }
                     when (e.key) {
                         Key.Escape, Key.Backspace -> { state.navigator.back(); true }
                         Key.P -> { state.predictionOn = !state.predictionOn; true }
                         Key.H -> { state.navigator.home(); true }
+                        Key.M -> { state.toggleMute(); true }
+                        Key.G -> { state.earthMode = if (state.earthMode == EarthMode.Real) EarthMode.Holo else EarthMode.Real; true }
                         else -> false
                     }
                 }
@@ -180,6 +188,20 @@ private fun ScreenContent(screen: Screen) {
         is FilesScreen -> FilesView(screen.node)
         CalculatorScreen -> CalculatorView()
         GlobeScreen -> GlobeView()
+        is CityScreen -> com.zain.holoos.apps.CityView(screen.city)
+    }
+}
+
+private fun calculatorKey(key: Key, code: Int): String? {
+    if (key == Key.Backspace) return "⌫"
+    if (key == Key.Escape) return null
+    if (key == Key.Enter || key == Key.NumPadEnter) return "="
+    return when (val ch = code.toChar()) {
+        in '0'..'9' -> ch.toString()
+        '.', ',' -> "."
+        '+' -> "+"; '-' -> "−"; '*', 'x', 'X' -> "×"; '/' -> "÷"; '=' -> "="; '%' -> "%"
+        'c', 'C' -> "C"
+        else -> null
     }
 }
 
@@ -221,10 +243,13 @@ private fun DrawScope.floorGrid(t: Float) {
     }
 }
 
+private class ScanLines { var size = androidx.compose.ui.geometry.Size.Zero; val path = androidx.compose.ui.graphics.Path() }
+
 /** Cursor reticle, prediction ghost, dive streaks, particles and scanlines. */
 @Composable
 private fun Overlay() {
     val holo = LocalHolo.current
+    val scan = remember { ScanLines() }
     Canvas(Modifier.fillMaxSize()) {
         val t = holo.seconds
         val hand = holo.hand
@@ -269,6 +294,15 @@ private fun Overlay() {
                     Offset(c.x + kotlin.math.cos(a) * (r + 11), c.y + kotlin.math.sin(a) * (r + 11)), 1.2f,
                 )
             }
+            if (holo.predictionOn && hand.decelerating) {
+                // Kinematic endpoint: where the movement will come to rest.
+                val ep = hand.endpoint
+                val s = 7f
+                val diamond = androidx.compose.ui.graphics.Path().apply {
+                    moveTo(ep.x, ep.y - s); lineTo(ep.x + s, ep.y); lineTo(ep.x, ep.y + s); lineTo(ep.x - s, ep.y); close()
+                }
+                glowPath(HoloColors.Amber, diamond, 1.2f, 0.9f)
+            }
             if (holo.predictionOn) {
                 val pr = hand.predicted
                 if (hypot(pr.x - c.x, pr.y - c.y) > 8f) {
@@ -280,10 +314,11 @@ private fun Overlay() {
             }
         }
 
-        var y = 0f
-        while (y < size.height) {
-            drawLine(HoloColors.Cyan, Offset(0f, y), Offset(size.width, y), 1f, alpha = 0.018f)
-            y += 3f
+        if (scan.size != size) {
+            scan.size = size; scan.path.reset()
+            var y = 0f
+            while (y < size.height) { scan.path.moveTo(0f, y); scan.path.lineTo(size.width, y); y += 3f }
         }
+        drawPath(scan.path, HoloColors.Cyan, alpha = 0.018f, style = androidx.compose.ui.graphics.drawscope.Stroke(1f))
     }
 }

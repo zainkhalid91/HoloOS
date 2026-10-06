@@ -23,7 +23,15 @@ import com.zain.holoos.input.HandState
 import com.zain.holoos.input.IntentModel
 import com.zain.holoos.input.MotionPredictor
 import com.zain.holoos.input.TargetRegistry
+import com.zain.holoos.audio.Mixer
+import com.zain.holoos.audio.Sfx
+import com.zain.holoos.audio.SoundBank
+import com.zain.holoos.audio.startAudio
+import com.zain.holoos.input.IntentScore
+import com.zain.holoos.input.UsagePrior
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlin.math.cos
 import kotlin.math.sin
@@ -34,6 +42,7 @@ data object HomeScreen : Screen { override val title = "Core" }
 data class FilesScreen(val node: FsNode) : Screen { override val title = node.name }
 data object CalculatorScreen : Screen { override val title = "Calculator" }
 data object GlobeScreen : Screen { override val title = "Globe" }
+data class CityScreen(val city: com.zain.holoos.geo.WorldCity) : Screen { override val title = city.name }
 
 class NavEntry(val id: Int, val screen: Screen, val origin: Rect?)
 
@@ -59,6 +68,8 @@ class Navigator(private val scope: CoroutineScope) {
     val canGoBack: Boolean get() = stack.size > 1
 
     private val easing = CubicBezierEasing(0.6f, 0f, 0.2f, 1f)
+    var onDiveIn: (() -> Unit)? = null
+    var onDiveOut: (() -> Unit)? = null
 
     fun push(screen: Screen, origin: Rect) {
         if (transition != null) return
@@ -66,6 +77,7 @@ class Navigator(private val scope: CoroutineScope) {
         val to = NavEntry(nextId++, screen, origin)
         stack.add(to)
         transition = Transition(from, to, true)
+        onDiveIn?.invoke()
         scope.launch {
             dive.snapTo(0f)
             dive.animateTo(1f, tween(620, easing = easing))
@@ -79,6 +91,7 @@ class Navigator(private val scope: CoroutineScope) {
         val parent = stack[stack.size - 2]
         transition = Transition(parent, child, false)
         backZoom = 0f
+        onDiveOut?.invoke()
         scope.launch {
             dive.snapTo(1f)
             dive.animateTo(0f, tween(520, easing = easing))
@@ -125,8 +138,38 @@ class Particles {
     val capacity get() = max
 }
 
+/** Directory listings shared by previews, dives and speculative prefetch. */
+class ListingCache(private val scope: CoroutineScope, private val source: com.zain.holoos.fs.FileSource) {
+    private val done = HashMap<String, List<FsNode>>()
+    private val pending = HashMap<String, kotlinx.coroutines.Deferred<List<FsNode>>>()
+    private val prefetched = androidx.compose.runtime.mutableStateMapOf<String, Boolean>()
+
+    fun cached(node: FsNode): List<FsNode>? = done[node.path]
+
+    suspend fun list(node: FsNode): List<FsNode> {
+        done[node.path]?.let { return it }
+        val job = pending.getOrPut(node.path) {
+            scope.async(Dispatchers.Default) { runCatching { source.list(node) }.getOrDefault(emptyList()) }
+        }
+        return job.await().also { done[node.path] = it; pending.remove(node.path) }
+    }
+
+    /** Speculative: warm a folder and every sub-folder preview before the user arrives. */
+    fun prefetch(node: FsNode) {
+        if (prefetched.put(node.path, true) != null) return
+        scope.launch {
+            val kids = list(node)
+            kids.filter { it.isDirectory }.take(48).forEach { list(it) }
+        }
+    }
+
+    fun isPrefetched(node: FsNode) = prefetched.containsKey(node.path)
+}
+
+enum class EarthMode { Holo, Real }
+
 /** Everything the UI tree needs, provided once through [LocalHolo]. */
-class HoloOsState(scope: CoroutineScope) {
+class HoloOsState(private val scope: CoroutineScope) {
     val hand = HandState()
     val predictor = MotionPredictor(hand)
     val targets = TargetRegistry()
@@ -134,6 +177,10 @@ class HoloOsState(scope: CoroutineScope) {
     val particles = Particles()
     val calculator = CalculatorEngine()
     val files = com.zain.holoos.fs.platformFileSource()
+    val listings = ListingCache(scope, files)
+    val mixer = Mixer()
+    val prior = UsagePrior()
+    val intentScore = IntentScore()
 
     var size by mutableStateOf(Size.Zero)
     /** Monotonic animation clock in ms; read it only in draw blocks. */
@@ -141,10 +188,43 @@ class HoloOsState(scope: CoroutineScope) {
     var fps by mutableIntStateOf(0)
     var frameMs by mutableFloatStateOf(0f)
     var predictionOn by mutableStateOf(true)
+    var muted by mutableStateOf(false)
+    var earthMode by mutableStateOf(EarthMode.Real)
+    var earth: com.zain.holoos.geo.EarthRenderer? = null
+    var earthLoaded by mutableStateOf(false)
+
+    /** A screen may claim scroll / pinch zoom (the globe does). Return true if consumed. */
+    var screenZoom: ((amount: Float, at: Offset) -> Boolean)? = null
+
+    private var lastUsed = "-"
+    private val context: String get() = navigator.top.screen.title + "|" + lastUsed
 
     val seconds: Float get() = timeMs / 1000f
 
+    init {
+        navigator.onDiveIn = { sfx(Sfx.DiveIn) }
+        navigator.onDiveOut = { sfx(Sfx.DiveOut) }
+        targets.onHoverEnter = { sfx(Sfx.Hover, pitch = 0.95f + Random.nextFloat() * 0.1f) }
+        scope.launch(Dispatchers.Default) {
+            SoundBank.warmUp()
+            startAudio(mixer)
+            sfx(Sfx.Boot)
+        }
+    }
+
+    fun sfx(s: Sfx, pitch: Float = 1f, gain: Float = 1f) { mixer.muted = muted; mixer.play(s, pitch, gain) }
+
+    fun toggleMute() { muted = !muted; mixer.muted = muted }
+
     fun burst(at: Offset, warm: Boolean = false) = particles.burst(at, warm = warm)
+
+    /** Every tap / dive: score the intent model, then teach the usage prior. */
+    fun onTargetUsed(e: com.zain.holoos.input.HoloTargetEntry) {
+        intentScore.onTap(timeMs, e.id)
+        prior.record(context, e.id)
+        lastUsed = e.id
+        if (!e.id.startsWith("calc:") && e.onDive == null) sfx(Sfx.Tap)
+    }
 
     private var lastNanos = 0L
     private var fpsFrames = 0
@@ -157,7 +237,13 @@ class HoloOsState(scope: CoroutineScope) {
         predictor.enabled = predictionOn
         predictor.tick(timeMs, size.width, size.height)
         targets.tick(hand, dt)
-        IntentModel.update(targets.all, hand, predictor.direction())
+        val ctx = context
+        val vocab = targets.all.size
+        IntentModel.update(targets.all, hand, predictor.direction(), dt) { prior.logProb(ctx, it.id, vocab) }
+        val top = targets.top()?.takeIf { it.probability > 0.35f }
+        intentScore.sample(timeMs, top?.id)
+        // Speculative execution: warm the folder the hand is heading for.
+        if (top != null && top.probability > 0.55f) (top.payload as? FsNode)?.let { listings.prefetch(it) }
         particles.tick(dt)
         if (navigator.backZoom > 0f) navigator.backZoom = (navigator.backZoom - dt * 0.9f).coerceAtLeast(0f)
         fpsFrames++; fpsAcc += dt
@@ -167,10 +253,11 @@ class HoloOsState(scope: CoroutineScope) {
     /** Positive = zoom in (dive into what the hand is over), negative = zoom out. */
     fun zoomGesture(amount: Float, at: Offset = hand.position) {
         if (navigator.transition != null) return
+        if (screenZoom?.invoke(amount, at) == true) return
         val target = targets.at(at.x, at.y)?.takeIf { it.onDive != null }
         if (amount > 0f && target != null) {
             target.zoom += amount
-            if (target.zoom >= 1f) { target.zoom = 0f; burst(at, warm = true); target.onDive?.invoke(target.bounds) }
+            if (target.zoom >= 1f) { target.zoom = 0f; burst(at, warm = true); onTargetUsed(target); target.onDive?.invoke(target.bounds) }
         } else if (amount < 0f) {
             if (target != null && target.zoom > 0f) { target.zoom = (target.zoom + amount).coerceAtLeast(0f); return }
             if (!navigator.canGoBack) return

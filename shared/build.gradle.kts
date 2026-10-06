@@ -14,6 +14,7 @@ kotlin {
         compileSdk = 37
         minSdk = 29
         compilerOptions { jvmTarget.set(JvmTarget.JVM_21) }
+        androidResources { enable = true }
     }
 
     jvm("desktop") {
@@ -26,6 +27,7 @@ kotlin {
             api(libs.compose.foundation)
             api(libs.compose.ui)
             api(libs.compose.animation)
+            implementation(libs.compose.resources)
         }
         getByName("desktopMain") {
             dependencies {
@@ -36,10 +38,20 @@ kotlin {
     }
 }
 
+compose.resources {
+    packageOfResClass = "com.zain.holoos.res"
+}
+
 compose.desktop {
     application {
         mainClass = "com.zain.holoos.MainKt"
-        jvmArgs += listOf("-Dskiko.renderApi=DIRECT3D", "-Dskiko.vsync.enabled=true")
+        jvmArgs += listOf(
+            "-Dskiko.renderApi=DIRECT3D",
+            "-Dskiko.vsync.enabled=true",
+            // Optimus laptops: render on the discrete GPU, not the integrated one.
+            "-Dskiko.directx.gpu.priority=discrete",
+            "-Dskiko.gpu.priority=discrete",
+        )
         nativeDistributions {
             targetFormats(TargetFormat.Msi)
             packageName = "HoloOS"

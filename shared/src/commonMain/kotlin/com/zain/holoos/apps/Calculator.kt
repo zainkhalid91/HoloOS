@@ -190,10 +190,24 @@ fun CalculatorView() {
             }
             for (row in keys) {
                 Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                    for (k in row) Key(k, keySize) { calc.press(k) }
+                    for (k in row) Key(k, keySize) { pressWithSound(holo, k) }
                 }
             }
         }
+    }
+}
+
+/** Digits play a pentatonic scale, so typing a number sounds like a little melody. */
+private val pentatonic = floatArrayOf(1f, 1.125f, 1.25f, 1.5f, 1.6875f, 2f, 2.25f, 2.5f, 3f, 3.375f)
+
+fun pressWithSound(holo: com.zain.holoos.core.HoloOsState, k: String) {
+    val before = holo.calculator.display
+    holo.calculator.press(k)
+    when {
+        holo.calculator.display == "ERROR" && before != "ERROR" -> holo.sfx(com.zain.holoos.audio.Sfx.Error)
+        k.length == 1 && k[0].isDigit() -> holo.sfx(com.zain.holoos.audio.Sfx.Key, pitch = 0.75f * pentatonic[k[0] - '0'])
+        k == "=" -> holo.sfx(com.zain.holoos.audio.Sfx.Lock)
+        else -> holo.sfx(com.zain.holoos.audio.Sfx.KeyOp)
     }
 }
 

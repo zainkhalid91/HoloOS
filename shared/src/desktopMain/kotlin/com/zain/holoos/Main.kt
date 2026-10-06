@@ -7,7 +7,14 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.WindowPlacement
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import com.zain.holoos.core.CalculatorScreen
+import com.zain.holoos.core.GlobeScreen
 import com.zain.holoos.core.HoloOsApp
+import com.zain.holoos.core.rememberHoloOsState
+import kotlinx.coroutines.delay
 
 fun main() = application {
     val windowed = System.getProperty("holoos.windowed") == "true" || System.getenv("HOLOOS_WINDOWED") == "1"
@@ -24,6 +31,18 @@ fun main() = application {
             if (e.key == androidx.compose.ui.input.key.Key.F4 && e.isAltPressed) { exitApplication(); true } else false
         },
     ) {
-        HoloOsApp()
+        val holo = rememberHoloOsState()
+        // Dev switch: HOLOOS_START=globe|calculator opens a screen on launch.
+        LaunchedEffect(Unit) {
+            val start = when (System.getenv("HOLOOS_START")) {
+                "globe" -> GlobeScreen
+                "calculator" -> CalculatorScreen
+                else -> null
+            } ?: return@LaunchedEffect
+            delay(900)
+            val c = Offset(holo.size.width / 2, holo.size.height / 2)
+            holo.navigator.push(start, Rect(c.x - 80f, c.y - 80f, c.x + 80f, c.y + 80f))
+        }
+        HoloOsApp(holo)
     }
 }

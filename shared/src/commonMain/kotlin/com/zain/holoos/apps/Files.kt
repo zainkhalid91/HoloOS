@@ -57,9 +57,7 @@ import kotlin.math.min
 @Composable
 fun FilesView(node: FsNode) {
     val holo = LocalHolo.current
-    val children by produceState<List<FsNode>?>(null, node) {
-        value = withContext(Dispatchers.Default) { runCatching { holo.files.list(node) }.getOrDefault(emptyList()) }
-    }
+    val children by produceState(holo.listings.cached(node), node) { value = holo.listings.list(node) }
     val grid = rememberLazyGridState()
 
     Column(Modifier.fillMaxSize().padding(horizontal = 28.dp)) {
@@ -115,14 +113,13 @@ private fun Assemble(index: Int, content: @Composable () -> Unit) {
 @Composable
 private fun FolderCard(folder: FsNode) {
     val holo = LocalHolo.current
-    val inner by produceState<List<FsNode>?>(null, folder) {
-        value = withContext(Dispatchers.Default) { runCatching { holo.files.list(folder) }.getOrDefault(emptyList()) }
-    }
+    val inner by produceState(holo.listings.cached(folder), folder) { value = holo.listings.list(folder) }
     HoloTarget(
         "fs:${folder.path}",
         Modifier.fillMaxWidth().height(150.dp),
         onDive = { r -> holo.navigator.push(FilesScreen(folder), r) },
         zoomScale = 0.12f,
+        payload = folder,
     ) { e ->
         Box(Modifier.fillMaxSize()) {
             Canvas(Modifier.matchParentSize()) {
@@ -135,8 +132,8 @@ private fun FolderCard(folder: FsNode) {
                     maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
                 BasicText(
-                    inner?.let { "${it.size} ITEMS" } ?: "…",
-                    style = holoText(9.sp, HoloColors.Muted, glow = 0f),
+                    (inner?.let { "${it.size} ITEMS" } ?: "…") + if (holo.listings.isPrefetched(folder)) "  ·  PRE-LOADED" else "",
+                    style = holoText(9.sp, if (holo.listings.isPrefetched(folder)) HoloColors.Amber else HoloColors.Muted, glow = 0f),
                 )
             }
         }

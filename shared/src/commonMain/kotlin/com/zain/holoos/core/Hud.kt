@@ -57,13 +57,18 @@ fun Hud() {
         Column(Modifier.align(Alignment.TopEnd), horizontalAlignment = Alignment.End) {
             BasicText(clock, style = holoText(16.sp, HoloColors.Cyan, spacing = 3.sp))
             BasicText(
-                "${holo.fps} FPS · ${(holo.frameMs * 10).toInt() / 10f} MS · PRED ${if (holo.predictionOn) "ON" else "OFF"}",
+                "${holo.fps} FPS · ${(holo.frameMs * 10).toInt() / 10f} MS · PRED ${if (holo.predictionOn) "ON" else "OFF"} · SFX ${if (holo.muted) "OFF" else "ON"}",
                 style = holoText(10.sp, HoloColors.Muted, glow = 0f),
+            )
+            val sc = holo.intentScore
+            BasicText(
+                if (sc.total == 0) "INTENT HIT RATE · AWAITING DATA" else "INTENT HIT RATE ${(sc.accuracy * 100).toInt()}% · ${sc.hits}/${sc.total} @150MS",
+                style = holoText(10.sp, if (sc.total > 0 && sc.accuracy > 0.7f) HoloColors.Amber else HoloColors.Muted, glow = 0f),
             )
         }
 
         BasicText(
-            "TAP OR SCROLL-ZOOM TO DIVE  ·  SCROLL OUT / ESC TO RISE  ·  H HOME  ·  P PREDICTION",
+            "TAP OR SCROLL-ZOOM TO DIVE  ·  SCROLL OUT / ESC TO RISE  ·  H HOME  ·  P PREDICTION  ·  M SOUND  ·  G GLOBE MODE",
             style = holoText(10.sp, HoloColors.Muted, glow = 0f),
             modifier = Modifier.align(Alignment.BottomCenter),
         )
