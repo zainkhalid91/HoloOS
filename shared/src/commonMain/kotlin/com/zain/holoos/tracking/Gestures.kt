@@ -15,10 +15,11 @@ import kotlin.math.min
 enum class Gesture(val label: String, val action: String) {
     Point("POINT", "Move cursor"),
     Pinch("PINCH", "Select / open"),
-    PinchDrag("PINCH + MOVE", "Drag / spin"),
+    PinchDrag("PINCH + MOVE", "Drag / spin / scroll"),
+    Grab("CLOSE HAND", "Grab · open to drop"),
     TwoHandZoom("TWO-HAND PINCH", "Zoom in / out"),
     SwipeBack("PALM SWIPE ←", "Back"),
-    FistHold("FIST · HOLD", "Home"),
+    PeaceHome("PEACE ✌ · HOLD", "Home"),
     ThumbsUp("THUMBS UP · HOLD", "Accept prediction"),
     OpenPalm("OPEN PALM", "Hover"),
 }
@@ -103,6 +104,8 @@ interface GestureSink {
     fun onPress(pressed: Boolean)
     fun onTap(x: Float, y: Float)
     fun onDrag(dx: Float, dy: Float)
+    /** Closed hand: grab what's under the cursor (true) / open hand: drop it (false). */
+    fun onGrip(closed: Boolean)
     fun onZoom(amount: Float, at: Offset)
     fun onBack()
     fun onHome()
@@ -188,6 +191,8 @@ class GestureEngine(private val sink: GestureSink) {
     private var lastPrimaryAx = -1f; private var lastPrimaryAy = -1f
     private var bodyRatio = 0f; private var useBody = false
     private var outlierFrames = 0
+    private var gripping = false
+    private var twoPinchSince = 0L
     private var lastCursorT = 0L
     private var lastCx = 0f; private var lastCy = 0f
     private var vx = 0f; private var vy = 0f
@@ -291,16 +296,18 @@ class GestureEngine(private val sink: GestureSink) {
             return
         }
 
-        if (twoPinch) {
+        if (twoPinch && twoPinchSince == 0L) twoPinchSince = t
+        if (!twoPinch) twoPinchSince = 0L
+        if (twoPinch && t - twoPinchSince >= 200) {
             val d = hypot(hands[0].cursorX - hands[1].cursorX, hands[0].cursorY - hands[1].cursorY)
             if (twoHandDist > 0f) {
                 val mid = Offset((hands[0].cursorX + hands[1].cursorX) / 2, (hands[0].cursorY + hands[1].cursorY) / 2)
-                sink.onZoom((d / twoHandDist - 1f) * 3f, mid)
-            }
-            twoHandDist = d
+                val amount = (d / twoHandDist - 1f) * 3f
+                if (abs(amount) > 0.025f) { sink.onZoom(amount, mid); twoHandDist = d }
+            } else twoHandDist = d
             dragging = false; pinching = true
             now += Gesture.TwoHandZoom
-        } else {
+        } else if (!twoPinch) {
             twoHandDist = 0f
             when {
                 pose == HandPose.Pinch && !pinching -> {
@@ -322,6 +329,15 @@ class GestureEngine(private val sink: GestureSink) {
             }
         }
 
+        // Closed hand grabs: the session log showed fists used as the natural grab gesture.
+        val grip = pose == HandPose.Fist && !pinching
+        when {
+            grip && !gripping -> { gripping = true; sink.onGrip(true) }
+            grip -> { if (moveX != 0f || moveY != 0f) sink.onDrag(moveX, moveY) }
+            gripping -> { gripping = false; sink.onGrip(false) }
+        }
+        if (gripping) now += Gesture.Grab
+
         if (pose == HandPose.Point) now += Gesture.Point
         if (pose == HandPose.Open) {
             now += Gesture.OpenPalm
@@ -333,15 +349,15 @@ class GestureEngine(private val sink: GestureSink) {
         }
 
         // Hold gestures with a visible progress ring.
-        val holdTarget = when (pose) { HandPose.Fist -> HandPose.Fist; HandPose.ThumbsUp -> HandPose.ThumbsUp; else -> HandPose.None }
+        val holdTarget = when (pose) { HandPose.Victory -> HandPose.Victory; HandPose.ThumbsUp -> HandPose.ThumbsUp; else -> HandPose.None }
         if (holdTarget != holdPose) { holdPose = holdTarget; holdStart = t; holdFired = false }
-        val needed = if (holdPose == HandPose.Fist) 1400f else 700f
+        val needed = if (holdPose == HandPose.Victory) 1200f else 700f
         holdProgress = if (holdPose == HandPose.None || holdFired) 0f else ((t - holdStart) / needed).coerceIn(0f, 1f)
-        if (holdPose == HandPose.Fist) now += Gesture.FistHold
+        if (holdPose == HandPose.Victory) now += Gesture.PeaceHome
         if (holdPose == HandPose.ThumbsUp) now += Gesture.ThumbsUp
         if (!holdFired && holdProgress >= 1f) {
             holdFired = true; holdProgress = 0f
-            if (holdPose == HandPose.Fist) sink.onHome() else sink.onAccept()
+            if (holdPose == HandPose.Victory) sink.onHome() else sink.onAccept()
         }
         if (now != active) active = now
     }
@@ -350,6 +366,8 @@ class GestureEngine(private val sink: GestureSink) {
         lastSeenHandsMs = 0L
         hands.forEach { it.visible = false }
         if (pinching) { pinching = false; sink.onPress(false) }
+        if (gripping) { gripping = false; sink.onGrip(false) }
+        twoPinchSince = 0L
         dragging = false; twoHandDist = 0f; pose = HandPose.None; holdPose = HandPose.None; holdProgress = 0f
         fx.reset(); fy.reset(); lastCursorT = 0L; lastPrimaryAx = -1f; outlierFrames = 0
         if (active.isNotEmpty()) active = emptySet()

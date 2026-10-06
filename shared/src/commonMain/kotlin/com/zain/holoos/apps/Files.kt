@@ -60,6 +60,10 @@ fun FilesView(node: FsNode) {
     val children by produceState(holo.listings.cached(node), node) { value = holo.listings.list(node) }
     androidx.compose.runtime.LaunchedEffect(node) { holo.sfx(com.zain.holoos.audio.Sfx.Telemetry, gain = 0.8f) }
     val grid = rememberLazyGridState()
+    androidx.compose.runtime.DisposableEffect(grid) {
+        holo.screenDrag = { _, dy -> grid.dispatchRawDelta(-dy * 1.2f) }
+        onDispose { holo.screenDrag = null }
+    }
 
     Column(Modifier.fillMaxSize().padding(horizontal = 28.dp)) {
         Spacer(Modifier.height(78.dp))

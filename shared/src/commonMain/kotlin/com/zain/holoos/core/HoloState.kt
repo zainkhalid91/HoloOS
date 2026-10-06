@@ -172,7 +172,7 @@ class ListingCache(private val scope: CoroutineScope, private val source: com.za
 
 enum class EarthMode { Holo, Real }
 
-private const val DWELL_SECONDS = 0.9f
+private const val DWELL_SECONDS = 0.5f
 
 private const val LOG_HEADER = "t_ms,frame,src,cam_fps,pipe_ms,hands,body,pose,fingers,pinch,score,anchor_x,anchor_y,ref_x,ref_y,space," +
     "raw_cx,raw_cy,cx,cy,pred_x,pred_y,pinching,dragging,gestures,hover,top,top_p,grabbed,screen,transition,ui_fps,screen_px,event,detail"
@@ -237,6 +237,16 @@ class HoloOsState(private val scope: CoroutineScope) {
                 endGrab(); pressTarget = null
             }
         }
+        override fun onGrip(closed: Boolean) {
+            if (closed) {
+                pressTarget = targets.at(hand.x, hand.y)?.takeIf { it.grab != com.zain.holoos.input.Grab.None }
+                event("grip", pressTarget?.id ?: hoverId())
+                pressTarget?.let { beginGrab(it) }
+            } else {
+                event("release", grabbed?.id ?: "")
+                endGrab(); pressTarget = null
+            }
+        }
         override fun onTap(x: Float, y: Float) { event("tap", targets.at(x, y)?.id ?: "-"); activateAt(Offset(x, y)) }
         override fun onDrag(dx: Float, dy: Float) {
             val p = pressTarget
@@ -245,7 +255,7 @@ class HoloOsState(private val scope: CoroutineScope) {
         }
         override fun onZoom(amount: Float, at: Offset) { event("zoom", ((amount * 100).toInt() / 100f).toString()); zoomGesture(amount, at) }
         override fun onBack() { event("swipe-back", ""); navigator.back() }
-        override fun onHome() { event("fist-home", ""); if (navigator.canGoBack) { sfx(Sfx.KeyOp); navigator.home() } }
+        override fun onHome() { event("peace-home", ""); if (navigator.canGoBack) { sfx(Sfx.KeyOp); navigator.home() } }
         override fun onAccept() {
             val top = targets.top()?.takeIf { it.probability > 0.3f }
             event("thumbs-accept", top?.id ?: "none")
