@@ -32,6 +32,7 @@ fun main() = application {
         },
     ) {
         val holo = rememberHoloOsState()
+        holo.onExit = ::exitApplication
         // Dev switch: HOLOOS_START=globe|calculator opens a screen on launch.
         LaunchedEffect(Unit) {
             val start = when (System.getenv("HOLOOS_START")) {

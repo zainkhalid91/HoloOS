@@ -196,6 +196,23 @@ class HoloOsState(private val scope: CoroutineScope) {
     var trackerStatus by mutableStateOf(com.zain.holoos.tracking.TrackerStatus.Off)
         private set
 
+    /** Set by the platform entry point (desktop: exitApplication, Android: finish). */
+    var onExit: (() -> Unit)? = null
+    /** First exit request arms it; a second one within 2.5 s exits. Prevents stray pinches closing the app. */
+    var exitArmed by mutableStateOf(false)
+        private set
+
+    fun requestExit(immediate: Boolean = false) {
+        if (immediate || exitArmed) {
+            sfx(Sfx.DiveOut)
+            scope.launch { kotlinx.coroutines.delay(250); onExit?.invoke() }
+            return
+        }
+        exitArmed = true
+        sfx(Sfx.Notify, gain = 0.6f)
+        scope.launch { kotlinx.coroutines.delay(2500); exitArmed = false }
+    }
+
     /** Screens can take hand drags (globe spin) and free taps (city markers). */
     var screenDrag: ((dx: Float, dy: Float) -> Unit)? = null
     var screenTap: ((at: Offset) -> Boolean)? = null

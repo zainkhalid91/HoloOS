@@ -29,6 +29,21 @@ import com.zain.holoos.input.HoloTarget
 import kotlinx.coroutines.delay
 
 @Composable
+private fun ExitButton(holo: HoloOsState) {
+    val armed = holo.exitArmed
+    HoloTarget("hud-exit", onTap = { holo.requestExit() }) { e ->
+        Box(Modifier.size(if (armed) 168.dp else 84.dp, 30.dp), contentAlignment = Alignment.Center) {
+            val col = if (armed) HoloColors.Alert else if (e.hover > 0.5f) HoloColors.Amber else HoloColors.Cyan
+            Canvas(Modifier.matchParentSize()) {
+                drawPath(cutCornerPath(size, 8f), col, alpha = 0.05f + e.hover * 0.08f + if (armed) 0.08f else 0f, blendMode = androidx.compose.ui.graphics.BlendMode.Plus)
+                glowPath(col, cutCornerPath(size, 8f, 1f), 1.2f, 0.6f + e.hover * 0.6f + e.pulse + if (armed) 0.5f else 0f)
+            }
+            BasicText(if (armed) "TAP AGAIN TO EXIT" else "⏻ EXIT", style = holoText(11.sp, col, spacing = 2.sp))
+        }
+    }
+}
+
+@Composable
 fun Hud() {
     val holo = LocalHolo.current
     val nav = holo.navigator
@@ -55,7 +70,10 @@ fun Hud() {
         }
 
         Column(Modifier.align(Alignment.TopEnd), horizontalAlignment = Alignment.End) {
-            BasicText(clock, style = holoText(16.sp, HoloColors.Cyan, spacing = 3.sp))
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                BasicText(clock, style = holoText(16.sp, HoloColors.Cyan, spacing = 3.sp))
+                ExitButton(holo)
+            }
             BasicText(
                 "${holo.fps} FPS · ${(holo.frameMs * 10).toInt() / 10f} MS · PRED ${if (holo.predictionOn) "ON" else "OFF"} · SFX ${if (holo.muted) "OFF" else "ON"}",
                 style = holoText(10.sp, HoloColors.Muted, glow = 0f),
@@ -72,7 +90,7 @@ fun Hud() {
         }
 
         BasicText(
-            "TAP OR SCROLL-ZOOM TO DIVE  ·  SCROLL OUT / ESC TO RISE  ·  H HOME  ·  P PREDICTION  ·  M SOUND  ·  G GLOBE MODE  ·  C CALIBRATE HANDS",
+            "TAP OR SCROLL-ZOOM TO DIVE  ·  SCROLL OUT / ESC TO RISE  ·  H HOME  ·  P PREDICTION  ·  M SOUND  ·  G GLOBE  ·  C CALIBRATE  ·  CTRL+Q QUIT",
             style = holoText(10.sp, HoloColors.Muted, glow = 0f),
             modifier = Modifier.align(Alignment.BottomCenter),
         )

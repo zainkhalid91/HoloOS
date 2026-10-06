@@ -14,6 +14,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             val state = rememberHoloOsState()
+            state.onExit = { finish() }
             BackHandler(enabled = state.navigator.canGoBack) { state.navigator.back() }
             HoloOsApp(state)
         }
