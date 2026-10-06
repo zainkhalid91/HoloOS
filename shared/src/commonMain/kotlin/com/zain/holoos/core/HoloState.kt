@@ -222,6 +222,9 @@ class HoloOsState(private val scope: CoroutineScope) {
 
     /** Screens can take hand drags (globe spin) and free taps (city markers). */
     var screenDrag: ((dx: Float, dy: Float) -> Unit)? = null
+    /** Screens that consume open-hand swipes (fling, px/s) and "stop" fists. */
+    var screenFling: ((vx: Float, vy: Float) -> Unit)? = null
+    var screenHold: (() -> Unit)? = null
     var screenTap: ((at: Offset) -> Boolean)? = null
 
     /** Translates gesture events into the same paths mouse and touch use. */
@@ -237,11 +240,16 @@ class HoloOsState(private val scope: CoroutineScope) {
                 endGrab(); pressTarget = null
             }
         }
+        override fun onFling(vx: Float, vy: Float) {
+            event("fling", "${vx.toInt()},${vy.toInt()}")
+            screenFling?.invoke(vx, vy)
+        }
+        override fun onHold() { event("hold", ""); screenHold?.invoke() }
         override fun onGrip(closed: Boolean) {
             if (closed) {
                 pressTarget = targets.at(hand.x, hand.y)?.takeIf { it.grab != com.zain.holoos.input.Grab.None }
                 event("grip", pressTarget?.id ?: hoverId())
-                pressTarget?.let { beginGrab(it) }
+                pressTarget?.let { beginGrab(it) } ?: screenHold?.invoke()
             } else {
                 event("release", grabbed?.id ?: "")
                 endGrab(); pressTarget = null
@@ -412,6 +420,7 @@ class HoloOsState(private val scope: CoroutineScope) {
         tracker?.let { tr ->
             val wall = com.zain.holoos.geo.epochMillis()
             gestures?.setSource(tr.source)
+            gestures?.flingClaimed = screenFling != null
             gestures?.process(tr.latest, wall, size.width, size.height)
             val fid = tr.latest?.id ?: -1
             if (fid != loggedFrame) { loggedFrame = fid; logRow() }

@@ -84,6 +84,8 @@ private class GlobeCamera {
     var flying = false
     var toYaw = 0f; var toPitch = 0f; var toZoom = 1f
     var lastT = -1f
+    /** Gentle idle rotation; switched off once the user stops the globe with a fist. */
+    var autoSpin = true
 
     fun flyTo(c: WorldCity, z: Float) {
         toYaw = -c.lon.rad; toPitch = -c.lat.rad; toZoom = z; flying = true; vYaw = 0f; vPitch = 0f
@@ -98,10 +100,14 @@ private class GlobeCamera {
             yaw += dy * k; pitch += (toPitch - pitch) * k; zoom += (toZoom - zoom) * k
             if (abs(dy) < 0.002f && abs(toPitch - pitch) < 0.002f && abs(toZoom - zoom) < 0.01f) flying = false
         } else if (!dragging) {
-            yaw += vYaw * dt; pitch = (pitch + vPitch * dt).coerceIn(-1.45f, 1.45f)
-            val idle = if (zoom < 1.4f) 0.06f else 0f
-            vYaw += (idle - vYaw) * (1f - exp(-dt * 1.2f))
-            vPitch *= exp(-dt * 3f)
+            yaw += vYaw * dt
+            val p = pitch + vPitch * dt
+            if (p !in -1.45f..1.45f) vPitch = 0f
+            pitch = p.coerceIn(-1.45f, 1.45f)
+            // Momentum from a swipe fades over a couple of seconds, on both axes.
+            val idle = if (autoSpin && zoom < 1.4f) 0.06f else 0f
+            vYaw += (idle - vYaw) * (1f - exp(-dt * 0.8f))
+            vPitch *= exp(-dt * 0.8f)
         }
     }
 }
@@ -141,9 +147,21 @@ fun GlobeView() {
             val r = min(holo.size.width, holo.size.height) * 0.36f * cam.zoom
             cam.flying = false
             cam.yaw += dx / r; cam.pitch = (cam.pitch + dy / r).coerceIn(-1.45f, 1.45f)
-            cam.vYaw = dx / r * 30f
+            cam.vYaw = 0f; cam.vPitch = 0f
         }
-        onDispose { holo.screenZoom = null; holo.screenDrag = null; holo.screenTap = null }
+        // Open-hand swipe spins the globe along the swipe direction (both axes).
+        holo.screenFling = { vx, vy ->
+            val r = min(holo.size.width, holo.size.height) * 0.36f * cam.zoom
+            cam.flying = false
+            cam.vYaw = vx / r * 0.45f
+            cam.vPitch = vy / r * 0.45f
+        }
+        // A fist stops it right there.
+        holo.screenHold = {
+            if (abs(cam.vYaw) > 0.01f || abs(cam.vPitch) > 0.01f || cam.flying) holo.sfx(Sfx.KeyOp, pitch = 0.7f)
+            cam.vYaw = 0f; cam.vPitch = 0f; cam.flying = false; cam.autoSpin = false
+        }
+        onDispose { holo.screenZoom = null; holo.screenDrag = null; holo.screenTap = null; holo.screenFling = null; holo.screenHold = null }
     }
 
     fun select(i: Int) {

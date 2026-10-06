@@ -16,9 +16,9 @@ enum class Gesture(val label: String, val action: String) {
     Point("POINT", "Move cursor"),
     Pinch("PINCH", "Select / open"),
     PinchDrag("PINCH + MOVE", "Drag / spin / scroll"),
-    Grab("CLOSE HAND", "Grab · open to drop"),
-    TwoHandZoom("TWO-HAND PINCH", "Zoom in / out"),
-    SwipeBack("PALM SWIPE ←", "Back"),
+    Grab("CLOSE HAND", "Grab · stop spin · drag"),
+    TwoHandZoom("TWO HANDS APART / TOGETHER", "Zoom in / out"),
+    Swipe("OPEN HAND SWIPE", "Spin globe · ← back elsewhere"),
     PeaceHome("PEACE ✌ · HOLD", "Home"),
     ThumbsUp("THUMBS UP · HOLD", "Accept prediction"),
     OpenPalm("OPEN PALM", "Hover"),
@@ -106,6 +106,10 @@ interface GestureSink {
     fun onDrag(dx: Float, dy: Float)
     /** Closed hand: grab what's under the cursor (true) / open hand: drop it (false). */
     fun onGrip(closed: Boolean)
+    /** Fast open-hand motion, px/s. Only sent while a screen claims swipes (the globe). */
+    fun onFling(vx: Float, vy: Float)
+    /** The other hand closed into a fist: stop whatever is moving. */
+    fun onHold()
     fun onZoom(amount: Float, at: Offset)
     fun onBack()
     fun onHome()
@@ -193,6 +197,15 @@ class GestureEngine(private val sink: GestureSink) {
     private var outlierFrames = 0
     private var gripping = false
     private var fistFrames = 0
+
+    /** Set each frame by the app: true while the current screen consumes swipes (globe). */
+    var flingClaimed = false
+    private val prevHX = FloatArray(2); private val prevHY = FloatArray(2)
+    private val handVx = FloatArray(2); private val handVy = FloatArray(2)
+    private val velValid = BooleanArray(2)
+    private var lastFlingT = 0L
+    private var openDist = 0f
+    private var secondFistFrames = 0
     private var twoPinchSince = 0L
     private var lastCursorT = 0L
     private var lastCx = 0f; private var lastCy = 0f
@@ -277,6 +290,17 @@ class GestureEngine(private val sink: GestureSink) {
         lastCx = cx; lastCy = cy; lastCursorT = t
         primary.cursorX = cx; primary.cursorY = cy
 
+        // Per-hand velocity in screen px/s (from the unsmoothed mapping, lightly averaged).
+        for (i in 0..1) {
+            val hv = hands[i]
+            if (!hv.visible) { velValid[i] = false; continue }
+            if (velValid[i]) {
+                handVx[i] = handVx[i] * 0.5f + (hv.rawCursorX - prevHX[i]) / dt * 0.5f
+                handVy[i] = handVy[i] * 0.5f + (hv.rawCursorY - prevHY[i]) / dt * 0.5f
+            } else { handVx[i] = 0f; handVy[i] = 0f }
+            prevHX[i] = hv.rawCursorX; prevHY[i] = hv.rawCursorY; velValid[i] = true
+        }
+
         // Debounced pose: 3 consistent frames, except pinch which is immediate (hysteresis).
         val p = primary.pose
         if (p == rawPose) rawCount++ else { rawPose = p; rawCount = 1 }
@@ -341,14 +365,49 @@ class GestureEngine(private val sink: GestureSink) {
         if (gripping) now += Gesture.Grab
 
         if (pose == HandPose.Point) now += Gesture.Point
-        if (pose == HandPose.Open) {
-            now += Gesture.OpenPalm
-            if (t > swipeCooldownUntil && vx < -2.0f * screenW && abs(vx) > 2f * abs(vy)) {
-                swipeCooldownUntil = t + 800
-                sink.onBack()
-                now += Gesture.SwipeBack
+        val bothVisible = hands[0].visible && hands[1].visible
+        fun openish(h: HandView) = h.pose != HandPose.Fist && h.pose != HandPose.Pinch
+
+        // Two hands, palms open: apart = zoom in, together = zoom out (clap / spread).
+        var twoHandZooming = false
+        if (flingClaimed && bothVisible && openish(hands[0]) && openish(hands[1])) {
+            val d = hypot(hands[0].rawCursorX - hands[1].rawCursorX, hands[0].rawCursorY - hands[1].rawCursorY)
+            if (openDist > 0f) {
+                val rate = (d - openDist) / dt
+                if (abs(rate) > 450f) {
+                    val mid = Offset((hands[0].rawCursorX + hands[1].rawCursorX) / 2, (hands[0].rawCursorY + hands[1].rawCursorY) / 2)
+                    sink.onZoom((d / openDist - 1f) * 2.5f, mid)
+                    twoHandZooming = true
+                    now += Gesture.TwoHandZoom
+                }
             }
+            openDist = d
+        } else openDist = 0f
+
+        if (pose == HandPose.Open) now += Gesture.OpenPalm
+        if (flingClaimed) {
+            // Either hand: a fast open-hand swipe spins the globe along the swipe direction.
+            if (!twoHandZooming && !pinching && !gripping && t - lastFlingT > 80) {
+                for (i in 0..1) {
+                    val hv = hands[i]
+                    if (!hv.visible || hv.pose != HandPose.Open) continue
+                    if (hypot(handVx[i], handVy[i]) > 1100f) {
+                        lastFlingT = t
+                        sink.onFling(handVx[i], handVy[i])
+                        now += Gesture.Swipe
+                        break
+                    }
+                }
+            }
+        } else if (pose == HandPose.Open && t > swipeCooldownUntil && vx < -2.0f * screenW && abs(vx) > 2f * abs(vy)) {
+            swipeCooldownUntil = t + 800
+            sink.onBack()
+            now += Gesture.Swipe
         }
+
+        // The second hand making a fist also stops motion.
+        secondFistFrames = if (hands[1].visible && hands[1].pose == HandPose.Fist) secondFistFrames + 1 else 0
+        if (secondFistFrames == 3) sink.onHold()
 
         // Hold gestures with a visible progress ring.
         val holdTarget = when (pose) { HandPose.Victory -> HandPose.Victory; HandPose.ThumbsUp -> HandPose.ThumbsUp; else -> HandPose.None }
@@ -369,7 +428,7 @@ class GestureEngine(private val sink: GestureSink) {
         hands.forEach { it.visible = false }
         if (pinching) { pinching = false; sink.onPress(false) }
         if (gripping) { gripping = false; sink.onGrip(false) }
-        twoPinchSince = 0L
+        twoPinchSince = 0L; openDist = 0f; velValid[0] = false; velValid[1] = false; secondFistFrames = 0
         dragging = false; twoHandDist = 0f; pose = HandPose.None; holdPose = HandPose.None; holdProgress = 0f
         fx.reset(); fy.reset(); lastCursorT = 0L; lastPrimaryAx = -1f; outlierFrames = 0
         if (active.isNotEmpty()) active = emptySet()
