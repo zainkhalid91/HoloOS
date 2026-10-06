@@ -83,6 +83,7 @@ fun HomeView() {
                 n.id,
                 Modifier.offset(x, y).size(nodeSize),
                 onDive = { r -> holo.navigator.push(n.screen(), r) },
+                grab = com.zain.holoos.input.Grab.Keep,
             ) { e -> AppNodeView(n, e) }
         }
     }

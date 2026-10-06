@@ -45,3 +45,13 @@ expect fun startTracker(): TrackerLink?
 /** Tiny key/value persistence for calibration. */
 expect fun loadSetting(key: String): String?
 expect fun saveSetting(key: String, value: String)
+
+/** Append-only session log. Lines are queued and written on a background thread. */
+interface SessionLog {
+    val path: String
+    fun write(line: String)
+    fun close()
+}
+
+/** Desktop: ~/.holoos/logs/session-<time>.csv. Null where logging isn't supported. */
+expect fun openSessionLog(header: String): SessionLog?

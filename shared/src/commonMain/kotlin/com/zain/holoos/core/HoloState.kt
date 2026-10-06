@@ -172,6 +172,11 @@ class ListingCache(private val scope: CoroutineScope, private val source: com.za
 
 enum class EarthMode { Holo, Real }
 
+private const val DWELL_SECONDS = 1.0f
+
+private const val LOG_HEADER = "t_ms,frame,src,cam_fps,pipe_ms,hands,body,pose,fingers,pinch,score,anchor_x,anchor_y,ref_x,ref_y,space," +
+    "raw_cx,raw_cy,cx,cy,pred_x,pred_y,pinching,dragging,gestures,hover,top,top_p,grabbed,screen,transition,ui_fps,screen_px,event,detail"
+
 /** Everything the UI tree needs, provided once through [LocalHolo]. */
 class HoloOsState(private val scope: CoroutineScope) {
     val hand = HandState()
@@ -204,6 +209,8 @@ class HoloOsState(private val scope: CoroutineScope) {
 
     fun requestExit(immediate: Boolean = false) {
         if (immediate || exitArmed) {
+            if (log != null) event("exit", "")
+            log?.close()
             sfx(Sfx.DiveOut)
             scope.launch { kotlinx.coroutines.delay(250); onExit?.invoke() }
             return
@@ -220,18 +227,33 @@ class HoloOsState(private val scope: CoroutineScope) {
     /** Translates gesture events into the same paths mouse and touch use. */
     private inner class HandSink : com.zain.holoos.tracking.GestureSink {
         override fun onCursor(x: Float, y: Float, timeMs: Long) = predictor.onSample(x, y, this@HoloOsState.timeMs)
-        override fun onPress(pressed: Boolean) { hand.pressed = pressed }
-        override fun onTap(x: Float, y: Float) = activateAt(Offset(x, y))
-        override fun onDrag(dx: Float, dy: Float) { screenDrag?.invoke(dx, dy) }
-        override fun onZoom(amount: Float, at: Offset) = zoomGesture(amount, at)
-        override fun onBack() { navigator.back() }
-        override fun onHome() { if (navigator.canGoBack) { sfx(Sfx.KeyOp); navigator.home() } }
+        override fun onPress(pressed: Boolean) {
+            hand.pressed = pressed
+            if (pressed) {
+                pressTarget = targets.at(hand.x, hand.y)?.takeIf { it.grab != com.zain.holoos.input.Grab.None }
+                event("pinch-down", pressTarget?.id ?: hoverId())
+            } else {
+                event("pinch-up", "")
+                endGrab(); pressTarget = null
+            }
+        }
+        override fun onTap(x: Float, y: Float) { event("tap", targets.at(x, y)?.id ?: "-"); activateAt(Offset(x, y)) }
+        override fun onDrag(dx: Float, dy: Float) {
+            val p = pressTarget
+            if (grabbed == null && p != null) beginGrab(p)
+            if (grabbed != null) moveGrab(dx, dy) else screenDrag?.invoke(dx, dy)
+        }
+        override fun onZoom(amount: Float, at: Offset) { event("zoom", ((amount * 100).toInt() / 100f).toString()); zoomGesture(amount, at) }
+        override fun onBack() { event("swipe-back", ""); navigator.back() }
+        override fun onHome() { event("fist-home", ""); if (navigator.canGoBack) { sfx(Sfx.KeyOp); navigator.home() } }
         override fun onAccept() {
-            val top = targets.top()?.takeIf { it.probability > 0.3f } ?: return
+            val top = targets.top()?.takeIf { it.probability > 0.3f }
+            event("thumbs-accept", top?.id ?: "none")
+            top ?: return
             sfx(Sfx.Notify, gain = 0.6f)
             activateAt(top.bounds.center)
         }
-        override fun onHandsLost() { predictor.reset() }
+        override fun onHandsLost() { event("hands-lost", ""); predictor.reset(); endGrab() }
     }
 
     /** A hand "tap": the target under the point gets the same treatment as a click. */
@@ -239,10 +261,87 @@ class HoloOsState(private val scope: CoroutineScope) {
         if (navigator.transition != null) return
         val t = targets.at(at.x, at.y)
         when {
-            t?.onTap != null -> t.onTap?.invoke()
-            t?.onDive != null -> { t.pulse = 1f; burst(at, warm = true); onTargetUsed(t); t.onDive?.invoke(t.bounds) }
+            t != null && (t.onTap != null || t.onDive != null) -> { if (t.onDive != null) burst(at, warm = true); t.activate() }
             screenTap?.invoke(at) == true -> {}
             else -> burst(at)
+        }
+    }
+
+    // ---------------------------------------------------------------- grab
+    private var pressTarget: com.zain.holoos.input.HoloTargetEntry? = null
+    private var grabbed: com.zain.holoos.input.HoloTargetEntry? = null
+
+    fun beginGrab(e: com.zain.holoos.input.HoloTargetEntry) {
+        if (grabbed != null) return
+        grabbed = e; e.grabbed = true; e.dwell = 0f
+        sfx(Sfx.KeyOp, pitch = 0.8f)
+        event("grab", e.id)
+    }
+
+    fun moveGrab(dx: Float, dy: Float) { grabbed?.let { it.offsetX += dx; it.offsetY += dy } }
+
+    fun endGrab() {
+        val g = grabbed ?: return
+        g.grabbed = false; grabbed = null
+        sfx(Sfx.Tap, pitch = 0.75f)
+        event("drop", "${g.id} @ ${g.offsetX.toInt()},${g.offsetY.toInt()}")
+    }
+
+    // ---------------------------------------------------------------- diagnostics
+    /** Live debug view (D key). */
+    var debugOn by mutableStateOf(false)
+    /** Most recent gesture events, newest first, for the debug view. */
+    val recentEvents = androidx.compose.runtime.mutableStateListOf<String>()
+    val log: com.zain.holoos.tracking.SessionLog? = if (tracker != null) com.zain.holoos.tracking.openSessionLog(LOG_HEADER) else null
+    private var loggedFrame = -1
+
+    private fun hoverId(): String = if (hand.visible) targets.at(hand.x, hand.y)?.id ?: "-" else "-"
+
+    fun event(name: String, detail: String) {
+        val line = "$name ${detail.take(40)}".trim()
+        recentEvents.add(0, line)
+        while (recentEvents.size > 8) recentEvents.removeAt(recentEvents.lastIndex)
+        logRow(name, detail)
+    }
+
+    private fun csv(v: String) = if (v.contains(',') || v.contains('"')) "\"" + v.replace("\"", "'") + "\"" else v
+    private fun f1(v: Float) = ((v * 10).toInt() / 10f).toString()
+    private fun f3(v: Float) = ((v * 1000).toInt() / 1000f).toString()
+
+    private fun logRow(eventName: String = "", detail: String = "") {
+        val l = log ?: return
+        val g = gestures ?: return
+        val tr = tracker
+        val h = g.hands[0]
+        val top = targets.top()
+        val row = listOf(
+            com.zain.holoos.geo.epochMillis().toString(), g.lastFrameId.toString(), tr?.source ?: "-",
+            g.cameraFps.toInt().toString(), g.pipeLatencyMs.toInt().toString(), g.lastFrameHands.toString(),
+            if (g.bodyVisible) "1" else "0", if (h.visible) h.pose.name else "-", if (h.visible) h.extended else "-",
+            f3(h.pinchRatio), f3(h.score), f3(h.anchorX), f3(h.anchorY), f3(h.refX), f3(h.refY), if (h.bodySpace) "body" else "cam",
+            f1(h.rawCursorX), f1(h.rawCursorY), f1(h.cursorX), f1(h.cursorY), f1(hand.predictedX), f1(hand.predictedY),
+            if (g.isPinching) "1" else "0", if (g.isDragging) "1" else "0", g.active.joinToString("+") { it.name },
+            hoverId(), top?.id ?: "-", f3(top?.probability ?: 0f), grabbed?.id ?: "-",
+            navigator.top.screen.title, if (navigator.transition != null) "1" else "0", fps.toString(),
+            size.width.toInt().toString() + "x" + size.height.toInt().toString(), eventName, detail,
+        )
+        l.write(row.joinToString(",") { csv(it) })
+    }
+
+    private var dwellBlockedId: String? = null
+
+    /** Hover still on something for ~1 s to select it (camera hands only). */
+    private fun dwellTick(dt: Float) {
+        val g = gestures ?: return
+        if (!g.hands[0].visible || g.isPinching || grabbed != null || navigator.transition != null) return
+        val t = targets.at(hand.x, hand.y)
+        if (t == null || (t.onTap == null && t.onDive == null)) { dwellBlockedId = null; return }
+        if (t.id == dwellBlockedId) return
+        if (hand.speed < 220f) t.dwell += dt / DWELL_SECONDS else t.dwell = (t.dwell - dt * 2f).coerceAtLeast(0f)
+        if (t.dwell >= 1f) {
+            t.dwell = 0f; dwellBlockedId = t.id
+            event("dwell-select", t.id)
+            activateAt(t.bounds.center)
         }
     }
 
@@ -266,8 +365,8 @@ class HoloOsState(private val scope: CoroutineScope) {
     val seconds: Float get() = timeMs / 1000f
 
     init {
-        navigator.onDiveIn = { sfx(Sfx.DiveIn) }
-        navigator.onDiveOut = { sfx(Sfx.DiveOut) }
+        navigator.onDiveIn = { sfx(Sfx.DiveIn); if (log != null) event("dive-in", navigator.top.screen.title) }
+        navigator.onDiveOut = { sfx(Sfx.DiveOut); if (log != null) event("dive-out", navigator.top.screen.title) }
         listings.onPrefetched = { sfx(Sfx.Notify, gain = 0.45f) }
         targets.onHoverEnter = { sfx(Sfx.Hover, pitch = 0.95f + Random.nextFloat() * 0.1f) }
         scope.launch(Dispatchers.Default) {
@@ -304,11 +403,14 @@ class HoloOsState(private val scope: CoroutineScope) {
             val wall = com.zain.holoos.geo.epochMillis()
             gestures?.setSource(tr.source)
             gestures?.process(tr.latest, wall, size.width, size.height)
+            val fid = tr.latest?.id ?: -1
+            if (fid != loggedFrame) { loggedFrame = fid; logRow() }
             calibration?.tick(wall, size.width, size.height)
             if (trackerStatus != tr.status) trackerStatus = tr.status
         }
         predictor.tick(timeMs, size.width, size.height)
         targets.tick(hand, dt)
+        dwellTick(dt)
         val ctx = context
         val vocab = targets.all.size
         IntentModel.update(targets.all, hand, predictor.direction(), dt) { prior.logProb(ctx, it.id, vocab) }
@@ -329,7 +431,7 @@ class HoloOsState(private val scope: CoroutineScope) {
         val target = targets.at(at.x, at.y)?.takeIf { it.onDive != null }
         if (amount > 0f && target != null) {
             target.zoom += amount
-            if (target.zoom >= 1f) { target.zoom = 0f; burst(at, warm = true); onTargetUsed(target); target.onDive?.invoke(target.bounds) }
+            if (target.zoom >= 1f) { target.zoom = 0f; burst(at, warm = true); target.onDive?.invoke(target.bounds) }
         } else if (amount < 0f) {
             if (target != null && target.zoom > 0f) { target.zoom = (target.zoom + amount).coerceAtLeast(0f); return }
             if (!navigator.canGoBack) return

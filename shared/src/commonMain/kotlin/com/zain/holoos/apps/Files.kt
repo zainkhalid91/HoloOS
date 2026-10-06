@@ -121,6 +121,7 @@ private fun FolderCard(folder: FsNode) {
         onDive = { r -> holo.navigator.push(FilesScreen(folder), r) },
         zoomScale = 0.12f,
         payload = folder,
+        grab = com.zain.holoos.input.Grab.Spring,
     ) { e ->
         Box(Modifier.fillMaxSize()) {
             Canvas(Modifier.matchParentSize()) {
@@ -145,7 +146,7 @@ private fun FolderCard(folder: FsNode) {
 private fun FileCard(file: FsNode) {
     val holo = LocalHolo.current
     val kind = file.kind()
-    HoloTarget("fs:${file.path}", Modifier.fillMaxWidth().height(150.dp), onTap = {}) { e ->
+    HoloTarget("fs:${file.path}", Modifier.fillMaxWidth().height(150.dp), onTap = {}, grab = com.zain.holoos.input.Grab.Spring) { e ->
         Box(Modifier.fillMaxSize()) {
             Canvas(Modifier.matchParentSize()) {
                 panel(e, holo.seconds, dim = true)

@@ -154,3 +154,34 @@ actual fun startTracker(): TrackerLink? = runCatching { UdpTrackerLink() }.onFai
 private val settingsDir = File(System.getProperty("user.home"), ".holoos").apply { mkdirs() }
 actual fun loadSetting(key: String): String? = File(settingsDir, "$key.txt").takeIf { it.exists() }?.readText()
 actual fun saveSetting(key: String, value: String) { File(settingsDir, "$key.txt").writeText(value) }
+
+private class FileSessionLog(file: File, header: String) : SessionLog {
+    override val path: String = file.absolutePath
+    private val queue = java.util.concurrent.LinkedBlockingQueue<String>()
+    @Volatile private var open = true
+
+    init {
+        Thread({
+            file.bufferedWriter().use { w ->
+                w.write(header); w.newLine()
+                var lastFlush = System.currentTimeMillis()
+                while (open || queue.isNotEmpty()) {
+                    val line = queue.poll(200, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    if (line != null) { w.write(line); w.newLine() }
+                    if (System.currentTimeMillis() - lastFlush > 1000) { w.flush(); lastFlush = System.currentTimeMillis() }
+                }
+                w.flush()
+            }
+        }, "holo-log").apply { isDaemon = true }.start()
+        Runtime.getRuntime().addShutdownHook(Thread { close(); Thread.sleep(300) })
+    }
+
+    override fun write(line: String) { if (open) queue.offer(line) }
+    override fun close() { open = false }
+}
+
+actual fun openSessionLog(header: String): SessionLog? = runCatching {
+    val dir = File(settingsDir, "logs").apply { mkdirs() }
+    val stamp = java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"))
+    FileSessionLog(File(dir, "session-$stamp.csv"), header)
+}.getOrNull()

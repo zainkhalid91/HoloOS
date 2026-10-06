@@ -28,6 +28,29 @@ import com.zain.holoos.holo.holoText
 import com.zain.holoos.input.HoloTarget
 import kotlinx.coroutines.delay
 
+/** Live diagnostics: what the tracker sees, how it was classified, and the latest events. */
+@Composable
+private fun DebugPanel(holo: HoloOsState, modifier: Modifier) {
+    val g = holo.gestures
+    @Suppress("UNUSED_VARIABLE") val tick = holo.fps
+    Column(modifier) {
+        val h = g?.hands?.get(0)
+        BasicText("DEBUG · D TO HIDE · LOG ${holo.log?.path?.substringAfterLast('\\')?.substringAfterLast('/') ?: "OFF"}", style = holoText(10.sp, HoloColors.Alert, glow = 0f, spacing = 1.sp))
+        if (g == null || h == null) { BasicText("NO TRACKER", style = holoText(10.sp, HoloColors.Muted, glow = 0f)); return@Column }
+        val lines = listOf(
+            "HAND ${if (h.visible) "YES" else "NO"}  POSE ${h.pose}  FINGERS ${h.extended}  SCORE ${(h.score * 100).toInt()}%",
+            "PINCH RATIO ${(h.pinchRatio * 100).toInt() / 100f}  (ON < 0.28, OFF > 0.42)  PINCHING ${g.isPinching}  DRAG ${g.isDragging}",
+            "SPACE ${if (h.bodySpace) "BODY" else "CAMERA"}  REF ${(h.refX * 100).toInt() / 100f}, ${(h.refY * 100).toInt() / 100f}  BODY SEEN ${g.bodyVisible}",
+            "RAW ${h.rawCursorX.toInt()},${h.rawCursorY.toInt()}  CURSOR ${holo.hand.x.toInt()},${holo.hand.y.toInt()}  SPEED ${holo.hand.speed.toInt()} PX/S",
+            "UNDER CURSOR ${if (holo.hand.visible) holo.targets.at(holo.hand.x, holo.hand.y)?.id ?: "-" else "-"}",
+        )
+        lines.forEach { BasicText(it, style = holoText(10.sp, HoloColors.Text, glow = 0f, spacing = 0.5.sp)) }
+        holo.recentEvents.forEachIndexed { i, ev ->
+            BasicText("› $ev", style = holoText(10.sp, if (i == 0) HoloColors.Amber else HoloColors.Muted, glow = 0f, spacing = 0.5.sp))
+        }
+    }
+}
+
 @Composable
 private fun ExitButton(holo: HoloOsState) {
     val armed = holo.exitArmed
@@ -88,9 +111,10 @@ fun Hud() {
         if (holo.tracker != null) {
             com.zain.holoos.tracking.GesturePanel(holo, Modifier.align(Alignment.BottomStart).padding(bottom = 18.dp))
         }
+        if (holo.debugOn) DebugPanel(holo, Modifier.align(Alignment.TopCenter).padding(top = 52.dp))
 
         BasicText(
-            "TAP OR SCROLL-ZOOM TO DIVE  ·  SCROLL OUT / ESC TO RISE  ·  H HOME  ·  P PREDICTION  ·  M SOUND  ·  G GLOBE  ·  C CALIBRATE  ·  CTRL+Q QUIT",
+            "TAP OR SCROLL-ZOOM TO DIVE  ·  SCROLL OUT / ESC TO RISE  ·  H HOME  ·  P PREDICTION  ·  M SOUND  ·  G GLOBE  ·  C CALIBRATE  ·  D DEBUG  ·  CTRL+Q QUIT",
             style = holoText(10.sp, HoloColors.Muted, glow = 0f),
             modifier = Modifier.align(Alignment.BottomCenter),
         )

@@ -40,6 +40,7 @@ import com.zain.holoos.apps.FilesView
 import com.zain.holoos.apps.GlobeView
 import com.zain.holoos.apps.HomeView
 import com.zain.holoos.holo.HoloColors
+import com.zain.holoos.holo.glowArc
 import com.zain.holoos.holo.glowCircle
 import com.zain.holoos.holo.glowDot
 import com.zain.holoos.holo.glowLine
@@ -82,6 +83,7 @@ fun HoloOsApp(state: HoloOsState = rememberHoloOsState()) {
                         Key.P -> { state.predictionOn = !state.predictionOn; true }
                         Key.H -> { state.navigator.home(); true }
                         Key.M -> { state.toggleMute(); true }
+                        Key.D -> { state.debugOn = !state.debugOn; true }
                         Key.C -> { if (state.navigator.top.screen != HandsScreen) state.navigator.push(HandsScreen, androidx.compose.ui.geometry.Rect(state.size.width / 2 - 60f, state.size.height / 2 - 60f, state.size.width / 2 + 60f, state.size.height / 2 + 60f)); true }
                         Key.G -> { state.earthMode = if (state.earthMode == EarthMode.Real) EarthMode.Holo else EarthMode.Real; true }
                         else -> false
@@ -288,6 +290,29 @@ private fun Overlay() {
         }
 
         drawTrackedHands(holo)
+
+        // Dwell-to-select ring around the cursor, and an amber halo on a grabbed item.
+        for (e in holo.targets.all) {
+            if (e.dwell > 0.02f && hand.visible) {
+                glowArc(HoloColors.Ice, hand.position, 26f, -90f, 360f * e.dwell, 3f, 1f)
+            }
+            if (e.grabbed) {
+                drawRect(HoloColors.Amber, e.bounds.topLeft, e.bounds.size, alpha = 0.9f, style = androidx.compose.ui.graphics.drawscope.Stroke(2f), blendMode = BlendMode.Plus)
+            }
+        }
+
+        // Debug: raw mapped point (red) vs smoothed cursor (cyan) vs prediction (amber).
+        val g = holo.gestures
+        if (holo.debugOn && g != null && g.hands[0].visible) {
+            val h0 = g.hands[0]
+            val raw = Offset(h0.rawCursorX, h0.rawCursorY)
+            drawLine(HoloColors.Alert, Offset(raw.x - 10, raw.y), Offset(raw.x + 10, raw.y), 2f)
+            drawLine(HoloColors.Alert, Offset(raw.x, raw.y - 10), Offset(raw.x, raw.y + 10), 2f)
+            drawLine(HoloColors.Alert, raw, hand.position, 1f, alpha = 0.6f)
+            holo.targets.at(hand.x, hand.y)?.let { t ->
+                drawRect(HoloColors.Ice, t.bounds.topLeft, t.bounds.size, alpha = 0.8f, style = androidx.compose.ui.graphics.drawscope.Stroke(1f))
+            }
+        }
 
         if (hand.visible) {
             val c = hand.position

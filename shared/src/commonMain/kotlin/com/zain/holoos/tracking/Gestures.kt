@@ -119,6 +119,16 @@ class HandView {
     var cursorX = 0f; var cursorY = 0f
     /** Raw camera-space landmarks (aspect-corrected, 0..aspect × 0..1) for the mini view. */
     val raw = FloatArray(42)
+
+    // Diagnostics (logged every frame and shown in the debug view).
+    var pinchRatio = 0f
+    var anchorX = 0f; var anchorY = 0f
+    var refX = 0f; var refY = 0f
+    var bodySpace = false
+    /** Mapped screen position before smoothing, px. */
+    var rawCursorX = 0f; var rawCursorY = 0f
+    var score = 0f
+    var extended = ""
 }
 
 class GestureEngine(private val sink: GestureSink) {
@@ -178,6 +188,14 @@ class GestureEngine(private val sink: GestureSink) {
     var lastAnchorBodySpace = false; private set
 
     private var frameNowMs = 0L
+    private val lastRef = FloatArray(2); private var lastRefBody = false
+    /** Increments once per processed camera frame (the logger writes one row per frame). */
+    var processed = 0; private set
+    val currentPose: HandPose get() = pose
+    val isPinching: Boolean get() = pinching
+    val isDragging: Boolean get() = dragging
+    var lastFrameId = -1; private set
+    var lastFrameHands = 0; private set
 
     fun process(f: TrackFrame?, nowMs: Long, screenW: Float, screenH: Float) {
         if (f == null || screenW <= 0f) return
@@ -189,6 +207,8 @@ class GestureEngine(private val sink: GestureSink) {
         }
         if (f.id == lastFrame) return
         lastFrame = f.id
+        lastFrameId = f.id; lastFrameHands = f.hands.size
+        processed++
         lastSeenHandsMs = nowMs
         aspect = f.aspect
         cameraFps = f.cameraFps
@@ -339,6 +359,9 @@ class GestureEngine(private val sink: GestureSink) {
         }
         out.pose = pose
         out.isRight = h.isRight
+        out.pinchRatio = pinchRatio
+        out.score = h.score
+        out.extended = (if (thumbOut) "T" else "-") + (if (index) "I" else "-") + (if (middle) "M" else "-") + (if (ring) "R" else "-") + (if (pinky) "P" else "-")
 
         // Stable anchor: between the index knuckle and the thumb-index pinch point, so
         // closing a pinch barely moves the cursor.
@@ -346,6 +369,9 @@ class GestureEngine(private val sink: GestureSink) {
         val ay = (py(5) + (py(4) + py(8)) / 2) / 2
         val s = mapToScreen(ax, ay, out === hands[0])
         out.cursorX = s.x * sw; out.cursorY = s.y * sh
+        out.rawCursorX = out.cursorX; out.rawCursorY = out.cursorY
+        out.anchorX = ax; out.anchorY = ay
+        out.refX = lastRef[0]; out.refY = lastRef[1]; out.bodySpace = lastRefBody
 
         // Screen skeleton: landmarks around the cursor at a constant on-screen size.
         val scale = min(sw, sh) * 0.09f / palm
@@ -364,6 +390,7 @@ class GestureEngine(private val sink: GestureSink) {
         } else {
             bx = ax; by = ay; bodySpace = false
         }
+        lastRef[0] = bx; lastRef[1] = by; lastRefBody = bodySpace
         if (primary) { lastAnchorB[0] = bx; lastAnchorB[1] = by; lastAnchorBodySpace = bodySpace; remember(bx, by, frameNowMs) }
         val p = when {
             cal != null && cal.bodySpace == bodySpace -> cal.apply(bx, by)

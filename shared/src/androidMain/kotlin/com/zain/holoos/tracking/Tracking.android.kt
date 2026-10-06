@@ -5,3 +5,5 @@ package com.zain.holoos.tracking
 actual fun startTracker(): TrackerLink? = null
 actual fun loadSetting(key: String): String? = null
 actual fun saveSetting(key: String, value: String) {}
+
+actual fun openSessionLog(header: String): SessionLog? = null
