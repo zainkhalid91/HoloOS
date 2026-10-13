@@ -9,3 +9,4 @@ captures/
 tools/tracker/.venv/
 tools/tracker/models/*.task
 stark-hud/
+jester/
