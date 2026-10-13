@@ -51,6 +51,8 @@ import com.zain.holoos.input.HoloTarget
 import com.zain.holoos.input.HoloTargetEntry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import androidx.compose.foundation.gestures.animateScrollBy
 import kotlinx.coroutines.withContext
 import kotlin.math.min
 
@@ -60,9 +62,20 @@ fun FilesView(node: FsNode) {
     val children by produceState(holo.listings.cached(node), node) { value = holo.listings.list(node) }
     androidx.compose.runtime.LaunchedEffect(node) { holo.sfx(com.zain.holoos.audio.Sfx.Telemetry, gain = 0.8f) }
     val grid = rememberLazyGridState()
+    val pageScope = androidx.compose.runtime.rememberCoroutineScope()
     androidx.compose.runtime.DisposableEffect(grid) {
         holo.screenDrag = { _, dy -> grid.dispatchRawDelta(-dy * 1.2f) }
-        onDispose { holo.screenDrag = null }
+        // Swipe up / down pages through the folder (like flicking a touch screen);
+        // left / right fall through to back / next.
+        holo.screenSwipe = { dx, dy ->
+            if (kotlin.math.abs(dy) > kotlin.math.abs(dx) * 1.2f) {
+                val page = grid.layoutInfo.viewportSize.height * 0.8f
+                holo.sfx(com.zain.holoos.audio.Sfx.Hover, pitch = if (dy < 0f) 1.15f else 0.9f)
+                pageScope.launch { grid.animateScrollBy(if (dy < 0f) page else -page) }
+                true
+            } else false
+        }
+        onDispose { holo.screenDrag = null; holo.screenSwipe = null }
     }
 
     Column(Modifier.fillMaxSize().padding(horizontal = 28.dp)) {

@@ -11,6 +11,8 @@ import android.hardware.camera2.CaptureRequest
 import android.os.Bundle
 import android.os.SystemClock
 import android.util.Range
+import android.view.OrientationEventListener
+import android.view.Surface
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -148,6 +150,37 @@ class SensorActivity : ComponentActivity() {
             ?.filter { it.upper <= 60 }?.maxWithOrNull(compareBy({ it.upper }, { it.lower }))
     }.getOrNull()
 
+    /**
+     * The activity handles rotation itself (no restart), so CameraX never learned that the
+     * phone turned and frames arrived sideways: hand motion landed on the wrong axes. Follow
+     * the physical orientation instead (with 20° of hysteresis so it doesn't flip at 45°),
+     * which also works when the phone is propped up with the screen facing away.
+     */
+    private var analysis: ImageAnalysis? = null
+    private var rotation = Surface.ROTATION_0
+    private var orientationText by mutableStateOf("")
+    private val orientationListener by lazy {
+        object : OrientationEventListener(this) {
+            override fun onOrientationChanged(deg: Int) {
+                if (deg == ORIENTATION_UNKNOWN) return // lying flat: keep the last one
+                val centre = when (rotation) { Surface.ROTATION_0 -> 0; Surface.ROTATION_90 -> 270; Surface.ROTATION_180 -> 180; else -> 90 }
+                val off = ((deg - centre + 540) % 360) - 180
+                if (kotlin.math.abs(off) < 65) return
+                val r = when ((deg + 45) / 90 % 4) { 0 -> Surface.ROTATION_0; 1 -> Surface.ROTATION_270; 2 -> Surface.ROTATION_180; else -> Surface.ROTATION_90 }
+                if (r != rotation) setRotation(r)
+            }
+        }
+    }
+
+    private fun setRotation(r: Int) {
+        rotation = r
+        analysis?.targetRotation = r
+        orientationText = when (r) { Surface.ROTATION_0 -> "portrait"; Surface.ROTATION_90 -> "landscape"; Surface.ROTATION_180 -> "portrait (upside down)"; else -> "landscape (reversed)" }
+    }
+
+    override fun onResume() { super.onResume(); if (orientationListener.canDetectOrientation()) orientationListener.enable() }
+    override fun onPause() { orientationListener.disable(); super.onPause() }
+
     private fun bindCamera() {
         val providerFuture = ProcessCameraProvider.getInstance(this)
         providerFuture.addListener({
@@ -158,9 +191,11 @@ class SensorActivity : ComponentActivity() {
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
             bestFpsRange()?.let { Camera2Interop.Extender(builder).setCaptureRequestOption(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
-            val analysis = builder.build().also { it.setAnalyzer(analysisExecutor, ::analyze) }
+            val analysis = builder.build().also { it.setAnalyzer(analysisExecutor, ::analyze); it.targetRotation = rotation }
+            this.analysis = analysis
             provider.unbindAll()
             provider.bindToLifecycle(this, if (useBack) CameraSelector.DEFAULT_BACK_CAMERA else CameraSelector.DEFAULT_FRONT_CAMERA, analysis)
+            if (orientationText.isEmpty()) setRotation(rotation)
             status = "${if (useBack) "Back" else "Front"} camera · range ${bestFpsRange() ?: "default"} fps"
         }, ContextCompat.getMainExecutor(this))
     }
@@ -273,6 +308,7 @@ class SensorActivity : ComponentActivity() {
                 BasicText(if (linkUp) "LINKED TO PC OVER USB" else "WAITING FOR PC · START HOLOOS ON THE LAPTOP", style = holoText(12.sp, if (linkUp) HoloColors.Amber else HoloColors.Muted))
                 BasicText("${fps.toInt()} FPS · ${inferMs.toInt()} MS (${delegate.name}) · $handCount HANDS", style = holoText(12.sp, HoloColors.Text, glow = 0f))
                 BasicText(status.uppercase() + " · TAP TO SWITCH CAMERA", style = holoText(10.sp, HoloColors.Muted, glow = 0f))
+                if (orientationText.isNotEmpty()) BasicText("PHONE ${orientationText.uppercase()} · IMAGE KEPT UPRIGHT", style = holoText(10.sp, HoloColors.Muted, glow = 0f))
             }
             BasicText(
                 "SKELETON ONLY · NO CAMERA IMAGE IS SHOWN, STORED OR SENT",

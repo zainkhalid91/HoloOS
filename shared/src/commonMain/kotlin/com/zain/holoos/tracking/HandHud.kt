@@ -73,6 +73,36 @@ fun DrawScope.drawTrackedHands(holo: HoloOsState) {
     }
 }
 
+/** What each gesture does on the current screen (the legend changes with the app). */
+private fun actionFor(gesture: Gesture, screen: com.zain.holoos.core.Screen): String = when (gesture) {
+    Gesture.Swipe -> when (screen) {
+        is com.zain.holoos.core.GlobeScreen -> "Spin globe, any direction"
+        is com.zain.holoos.core.FilesScreen -> "← back · → next · ↑↓ page"
+        is com.zain.holoos.core.CityScreen -> "←→ spin city"
+        is com.zain.holoos.core.HomeScreen -> "→ reopen last app"
+        else -> "← back · → next"
+    }
+    Gesture.TwoHandZoom -> when (screen) {
+        is com.zain.holoos.core.GlobeScreen -> "Zoom globe · closed fully = back"
+        else -> "Apart = open item · together = back"
+    }
+    Gesture.Stop -> when (screen) {
+        is com.zain.holoos.core.GlobeScreen, is com.zain.holoos.core.CityScreen -> "Stop spinning"
+        else -> "Stop"
+    }
+    Gesture.Grab -> when (screen) {
+        is com.zain.holoos.core.GlobeScreen -> "Grab & turn globe"
+        else -> "Grab & move item"
+    }
+    Gesture.PinchDrag -> when (screen) {
+        is com.zain.holoos.core.GlobeScreen -> "Turn globe"
+        is com.zain.holoos.core.FilesScreen -> "Scroll"
+        is com.zain.holoos.core.CityScreen -> "Turn city"
+        else -> "Drag item"
+    }
+    else -> gesture.action
+}
+
 /** The gesture legend: status, a privacy-safe skeleton view, and every gesture with the active one lit. */
 @Composable
 fun GesturePanel(holo: HoloOsState, modifier: Modifier = Modifier) {
@@ -124,7 +154,10 @@ fun GesturePanel(holo: HoloOsState, modifier: Modifier = Modifier) {
                                 BasicText(gesture.label, style = holoText(9.sp, if (on) HoloColors.Amber else HoloColors.Text, glow = if (on) 8f else 0f, spacing = 1.sp))
                             }
                         }
-                        if (on) BasicText("  ${gesture.action.uppercase()}", style = holoText(8.sp, HoloColors.Amber, glow = 0f, spacing = 1.sp))
+                        BasicText(
+                            "  " + actionFor(gesture, holo.navigator.top.screen).uppercase(),
+                            style = holoText(8.sp, if (on) HoloColors.Amber else HoloColors.Muted, glow = 0f, spacing = 1.sp),
+                        )
                     }
                 }
             }

@@ -72,8 +72,20 @@ class Navigator(private val scope: CoroutineScope) {
     var onDiveIn: (() -> Unit)? = null
     var onDiveOut: (() -> Unit)? = null
 
-    fun push(screen: Screen, origin: Rect) {
+    /** Screens left with "back", newest last: swipe → re-enters them ("next"). */
+    private val forwardStack = ArrayList<Pair<Screen, Rect>>()
+    val canGoForward: Boolean get() = forwardStack.isNotEmpty()
+
+    fun forward(): Boolean {
+        if (transition != null) return false
+        val (s, o) = forwardStack.removeLastOrNull() ?: return false
+        push(s, o, keepForward = true)
+        return true
+    }
+
+    fun push(screen: Screen, origin: Rect, keepForward: Boolean = false) {
         if (transition != null) return
+        if (!keepForward) forwardStack.clear()
         val from = top
         val to = NavEntry(nextId++, screen, origin)
         stack.add(to)
@@ -90,6 +102,7 @@ class Navigator(private val scope: CoroutineScope) {
         if (transition != null || !canGoBack) return
         val child = top
         val parent = stack[stack.size - 2]
+        child.origin?.let { forwardStack.add(child.screen to it) }
         transition = Transition(parent, child, false)
         backZoom = 0f
         onDiveOut?.invoke()
@@ -104,6 +117,7 @@ class Navigator(private val scope: CoroutineScope) {
 
     fun home() {
         if (transition != null) return
+        forwardStack.clear()
         while (stack.size > 2) stack.removeAt(stack.lastIndex)
         back()
     }
@@ -175,7 +189,7 @@ enum class EarthMode { Holo, Real }
 private const val DWELL_SECONDS = 0.5f
 
 private const val LOG_HEADER = "t_ms,frame,src,cam_fps,pipe_ms,hands,body,pose,fingers,pinch,score,anchor_x,anchor_y,ref_x,ref_y,space," +
-    "raw_cx,raw_cy,cx,cy,pred_x,pred_y,pinching,dragging,gestures,hover,top,top_p,grabbed,screen,transition,ui_fps,back,screen_px,event,detail"
+    "raw_cx,raw_cy,cx,cy,pred_x,pred_y,pinching,dragging,gestures,hover,top,top_p,grabbed,screen,transition,ui_fps,back,ibend,phantom,screen_px,event,detail"
 
 /** Everything the UI tree needs, provided once through [LocalHolo]. */
 class HoloOsState(private val scope: CoroutineScope) {
@@ -233,6 +247,8 @@ class HoloOsState(private val scope: CoroutineScope) {
         event("invert-vertical", invertVertical.toString())
     }
     var screenHold: (() -> Unit)? = null
+    /** A screen may claim a discrete swipe (unit direction). Return true if consumed. */
+    var screenSwipe: ((dirX: Float, dirY: Float) -> Boolean)? = null
     var screenTap: ((at: Offset) -> Boolean)? = null
 
     /** Translates gesture events into the same paths mouse and touch use. */
@@ -252,18 +268,34 @@ class HoloOsState(private val scope: CoroutineScope) {
             event("fling", "${vx.toInt()},${vy.toInt()}")
             screenFling?.invoke(vx, vy)
         }
-        override fun onHold() { event("hold", ""); screenHold?.invoke() }
+        override fun onHold() { event("palm-stop", ""); screenHold?.invoke() }
         override fun onReturnIgnored(kind: String) { event("return-ignored", kind) }
         override fun onInterpretation(text: String) { event("read", text) }
         override fun onSpread(amount: Float, at: Offset) {
             event("spread", ((amount * 100).toInt() / 100f).toString())
-            screenZoom?.invoke(amount, at)
+            // Hands apart = zoom into what they opened over, together = zoom back out. The
+            // globe zooms its camera; elsewhere this dives into / out of holograms.
+            if (screenZoom?.invoke(amount, at) == true) return
+            val over = if (targets.at(at.x, at.y)?.onDive != null) at else hand.position
+            zoomGesture(amount * 1.8f, over)
+        }
+        override fun onSwipe(dirX: Float, dirY: Float, speed: Float) {
+            event("swipe", "${(dirX * 100).toInt()},${(dirY * 100).toInt()}")
+            if (navigator.transition != null || grabbed != null) return
+            if (screenFling != null) return // the globe spins instead
+            if (screenSwipe?.invoke(dirX, dirY) == true) return
+            if (kotlin.math.abs(dirX) < kotlin.math.abs(dirY) * 1.2f) return
+            if (dirX < 0f) {
+                if (navigator.canGoBack) { event("swipe-back", ""); navigator.back() } else sfx(Sfx.Denied, gain = 0.5f)
+            } else {
+                if (navigator.forward()) event("swipe-next", navigator.top.screen.title) else sfx(Sfx.Denied, gain = 0.5f)
+            }
         }
         override fun onGrip(closed: Boolean) {
             if (closed) {
                 pressTarget = targets.at(hand.x, hand.y)?.takeIf { it.grab != com.zain.holoos.input.Grab.None }
                 event("grip", pressTarget?.id ?: hoverId())
-                pressTarget?.let { beginGrab(it) } ?: screenHold?.invoke()
+                pressTarget?.let { beginGrab(it) }
             } else {
                 event("release", grabbed?.id ?: "")
                 endGrab(); pressTarget = null
@@ -355,7 +387,7 @@ class HoloOsState(private val scope: CoroutineScope) {
             if (g.isPinching) "1" else "0", if (g.isDragging) "1" else "0", g.active.joinToString("+") { it.name },
             hoverId(), top?.id ?: "-", f3(top?.probability ?: 0f), grabbed?.id ?: "-",
             navigator.top.screen.title, if (navigator.transition != null) "1" else "0", fps.toString(),
-            "${f3(h.backX)} ${f3(h.backY)} ${f3(h.backZ)}",
+            "${f3(h.backX)} ${f3(h.backY)} ${f3(h.backZ)}", f1(h.indexBend), g.phantoms.toString(),
             size.width.toInt().toString() + "x" + size.height.toInt().toString(), eventName, detail,
         )
         l.write(row.joinToString(",") { csv(it) })

@@ -76,7 +76,12 @@ fun CityView(city: WorldCity) {
 
     androidx.compose.runtime.DisposableEffect(orbit) {
         holo.screenDrag = { dx, _ -> orbit.angle += dx * 0.006f; orbit.vel = dx * 0.2f }
-        onDispose { holo.screenDrag = null }
+        // Swipe left / right spins the city; back out with two hands closing (or ✌).
+        holo.screenSwipe = { dx, dy ->
+            if (kotlin.math.abs(dx) >= kotlin.math.abs(dy)) { orbit.vel = if (dx > 0f) 1.6f else -1.6f; true } else false
+        }
+        holo.screenHold = { orbit.vel = 0f }
+        onDispose { holo.screenDrag = null; holo.screenSwipe = null; holo.screenHold = null }
     }
 
     Box(Modifier.fillMaxSize()) {

@@ -20,7 +20,10 @@ class SwipeClutchTest {
         override fun onDrag(dx: Float, dy: Float) {}
         override fun onGrip(closed: Boolean) {}
         override fun onFling(vx: Float, vy: Float) { flings += vx }
-        override fun onHold() {}
+        val swipes = ArrayList<Float>()
+        override fun onSwipe(dirX: Float, dirY: Float, speed: Float) { swipes += dirX }
+        var holds = 0
+        override fun onHold() { holds++ }
         override fun onSpread(amount: Float, at: Offset) { spreads += amount }
         override fun onReturnIgnored(kind: String) { ignored += kind }
         override fun onZoom(amount: Float, at: Offset) {}
@@ -49,7 +52,7 @@ class SwipeClutchTest {
 
     private fun run(xs: List<Float>): Recorder {
         val rec = Recorder()
-        val engine = GestureEngine(rec)
+        val engine = GestureEngine(rec).apply { phantomFilter = false }
         engine.flingClaimed = true
         var t = 1_000_000L
         xs.forEachIndexed { i, x ->
@@ -62,7 +65,7 @@ class SwipeClutchTest {
 
     private fun runTwo(pairs: List<Pair<Float, Float>>): Recorder {
         val rec = Recorder()
-        val engine = GestureEngine(rec)
+        val engine = GestureEngine(rec).apply { phantomFilter = false }
         engine.flingClaimed = true
         var t = 1_000_000L
         pairs.forEachIndexed { i, (l, r) ->
@@ -115,6 +118,7 @@ class SwipeClutchTest {
             override fun onFling(vx: Float, vy: Float) { rec.flings += vx; diag += vy / vx }
         })
         engine.flingClaimed = true
+        engine.phantomFilter = false
         var t = 1_000_000L
         val path = List(15) { 0.3f to 0.4f } + List(6) { (0.3f + 0.05f * (it + 1)) to (0.4f + 0.05f * (it + 1)) } + List(10) { 0.6f to 0.7f }
         path.forEachIndexed { i, (x, y) ->
@@ -148,25 +152,35 @@ class SwipeClutchTest {
         return TrackedHand(true, 0.95f, base)
     }
 
-    @Test fun palmLedReturnIsIgnoredEvenAtSameSpeed() {
-        val vys = ArrayList<Float>(); val ignored = ArrayList<String>()
-        val engine = GestureEngine(object : GestureSink by Recorder() {
-            override fun onFling(vx: Float, vy: Float) { vys += vy }
-            override fun onReturnIgnored(kind: String) { ignored += kind }
-        })
-        engine.flingClaimed = true
-        var t = 1_000_000L
-        val ys = List(15) { 0.6f } + List(6) { 0.6f - 0.05f * (it + 1) } + List(3) { 0.3f } + List(6) { 0.3f + 0.05f * (it + 1) } + List(10) { 0.6f }
-        ys.forEachIndexed { i, y ->
-            t += 33
-            engine.process(TrackFrame(i, t.toDouble(), t, 30f, 1280, 720, null, listOf(tiltedHand(y))), t, 1920f, 1080f)
-        }
-        assertTrue(vys.isNotEmpty() && vys.all { it < 0f }, "back-led upward swipe spins, palm-led return doesn't: $vys")
-        assertTrue("swipe" in ignored, "the palm-led stroke down is a return: $ignored")
-    }
-
     private fun still(x: Float, n: Int) = List(n) { x }
     private fun move(from: Float, to: Float, n: Int) = List(n) { from + (to - from) * (it + 1) / n }
+
+    @Test fun eachSwipeIsOneDiscreteSwipeEvent() {
+        // Back / next must fire once per swipe, not once per spin update; returns don't count.
+        val rec = run(still(0.6f, 15) + move(0.6f, 0.3f, 6) + still(0.3f, 3) + move(0.3f, 0.54f, 6) + still(0.54f, 10))
+        assertEquals(listOf(true), rec.swipes.map { it < 0f }, "one leftward swipe, return ignored: ${rec.swipes}")
+    }
+
+    @Test fun stillPalmStopsOnce() {
+        val rec = run(still(0.5f, 40))
+        assertEquals(1, rec.holds, "a full palm held still is one STOP")
+    }
+
+    @Test fun palmSettlingRightAfterASwipeDoesNotStop() {
+        // Swipe, then the hand rests for 0.4 s: the spin must survive.
+        val rec = run(still(0.3f, 15) + move(0.3f, 0.6f, 6) + still(0.6f, 12))
+        assertTrue(rec.flings.isNotEmpty())
+        assertEquals(1, rec.holds, "only the hold before the swipe, none right after it: ${rec.holds}")
+    }
+
+    @Test fun nextSwipeAfterAnIgnoredReturnCounts() {
+        // Log: swipe ↘, return ← ignored, then the next ↘ swipe was wrongly ignored too.
+        val rec = run(
+            still(0.3f, 15) + move(0.3f, 0.6f, 6) + still(0.6f, 3) +
+                move(0.6f, 0.4f, 6) + still(0.4f, 3) + move(0.4f, 0.7f, 6) + still(0.7f, 10),
+        )
+        assertEquals(2, rec.swipes.count { it > 0f }, "both rightward swipes count: ${rec.swipes} ${rec.ignored}")
+    }
 
     @Test fun returnStrokeAfterSwipeIsIgnored() {
         val rec = run(still(0.3f, 15) + move(0.3f, 0.6f, 6) + still(0.6f, 3) + move(0.6f, 0.36f, 6) + still(0.36f, 10))

@@ -14,11 +14,13 @@ import kotlin.math.min
 /** Every gesture HoloOS understands, in the order the legend shows them. */
 enum class Gesture(val label: String, val action: String) {
     Point("POINT", "Move cursor"),
+    IndexTap("POINT + DIP INDEX", "Tap / select"),
     Pinch("PINCH", "Select / open"),
     PinchDrag("PINCH + MOVE", "Drag / spin / scroll"),
-    Grab("CLOSE HAND", "Grab · stop spin · drag"),
+    Grab("CLOSE HAND", "Grab & move"),
+    Stop("FULL PALM · HOLD STILL", "Stop"),
     TwoHandZoom("TWO HANDS APART / TOGETHER", "Zoom in / out"),
-    Swipe("OPEN HAND SWIPE", "Spin globe · ← back elsewhere"),
+    Swipe("OPEN HAND SWIPE", "← back · → next"),
     PeaceHome("PEACE ✌ · HOLD", "Home"),
     ThumbsUp("THUMBS UP · HOLD", "Accept prediction"),
     OpenPalm("OPEN PALM", "Hover"),
@@ -118,6 +120,8 @@ interface GestureSink {
     fun onInterpretation(text: String) {}
     fun onZoom(amount: Float, at: Offset)
     fun onBack()
+    /** One deliberate open-hand swipe (unit direction, peak px/s), once per stroke. */
+    fun onSwipe(dirX: Float, dirY: Float, speed: Float) {}
     fun onHome()
     fun onAccept()
     fun onHandsLost()
@@ -135,6 +139,8 @@ class HandView {
 
     // Diagnostics (logged every frame and shown in the debug view).
     var pinchRatio = 0f
+    /** Angle (degrees) between the index finger (knuckle→tip) and the palm (wrist→middle knuckle). */
+    var indexBend = 0f
     var anchorX = 0f; var anchorY = 0f
     var refX = 0f; var refY = 0f
     var bodySpace = false
@@ -142,6 +148,8 @@ class HandView {
     var rawCursorX = 0f; var rawCursorY = 0f
     var score = 0f
     var extended = ""
+    /** Part of the hand is at the camera frame's border: landmarks there jitter wildly. */
+    var atEdge = false
     /** Unit vector out of the back of the hand (screen x right, y down, z away from camera). */
     var backX = 0f; var backY = 0f; var backZ = 0f
     /** Mapped position before the screen-edge clamp: velocities use this. */
@@ -153,6 +161,17 @@ class HandView {
  * (more hand movement per screen width). Tuned down after "too fast to control".
  */
 private const val CAMERA_REGION_W = 0.62f
+/** A new hand must move this far (palm, frame-height units) before it controls anything. */
+private const val PHANTOM_PROVE = 0.05f
+/** A hand frozen this long (ms) must move again: real hands always drift a little. */
+private const val PHANTOM_FREEZE_MS = 3000L
+/** Index finger dip (degrees beyond its resting angle) that starts an index tap. */
+private const val TAP_DIP_DEG = 20f
+/** A full palm held below this speed (px/s) for [PALM_STOP_MS] means STOP. */
+private const val PALM_STILL_SPEED = 300f
+private const val PALM_STOP_MS = 300L
+/** Landmarks within this fraction of the camera frame's border are unreliable. */
+private const val EDGE = 0.04f
 /** Peak open-hand speed (screen px/s) for a straight stroke to count as a swipe. */
 private const val SWIPE_SPEED = 1400f
 /** A stroke starts above this speed and ends after two frames below [STROKE_END]. */
@@ -161,6 +180,43 @@ private const val STROKE_END = 450f
 private const val CAMERA_REGION_H = 0.58f
 
 class GestureEngine(private val sink: GestureSink) {
+    // ---------------------------------------------------------------- phantom hands
+    /**
+     * The log showed a "hand" at a fixed spot in the room (bottom right of the image) for
+     * seconds at a time: its palm moved < 0.004 per second (a real hand held as still as
+     * possible moved more) and its pose flipped Open / Pinch / Victory. So a newly detected
+     * hand only counts once it has actually moved; a hand that then stays frozen for
+     * [PHANTOM_FREEZE_MS] has to move again before it counts.
+     */
+    var phantomFilter = true
+    private class HandTrack(var x: Float, var y: Float, var ox: Float, var oy: Float, var seen: Long) {
+        var proven = false; var refX = x; var refY = y; var stillSince = seen
+    }
+    private val tracks = ArrayList<HandTrack>()
+    private var phantomFrame = -1; private var phantomGood: List<TrackedHand> = emptyList()
+    /** Hands ignored as phantoms in the latest frame (for the log). */
+    var phantoms = 0; private set
+
+    private fun filterPhantoms(hands: List<TrackedHand>, now: Long): List<TrackedHand> {
+        tracks.removeAll { now - it.seen > 1500 }
+        if (!phantomFilter) { phantoms = 0; return hands }
+        val used = HashSet<HandTrack>()
+        val out = ArrayList<TrackedHand>(2)
+        for (h in hands) {
+            val x = palmX(h); val y = palmY(h)
+            var tr = tracks.filter { it !in used }.minByOrNull { hypot(it.x - x, it.y - y) }
+            if (tr == null || hypot(tr.x - x, tr.y - y) > 0.25f) { tr = HandTrack(x, y, x, y, now); tracks += tr }
+            used += tr
+            tr.x = x; tr.y = y; tr.seen = now
+            if (hypot(x - tr.refX, y - tr.refY) > 0.012f) { tr.refX = x; tr.refY = y; tr.stillSince = now }
+            if (!tr.proven && hypot(x - tr.ox, y - tr.oy) > PHANTOM_PROVE) tr.proven = true
+            if (tr.proven && now - tr.stillSince > PHANTOM_FREEZE_MS) { tr.proven = false; tr.ox = x; tr.oy = y }
+            if (tr.proven) out += h
+        }
+        phantoms = hands.size - out.size
+        return out
+    }
+
     private fun palmX(h: TrackedHand) = (h.x(0) + h.x(5) + h.x(9) + h.x(13) + h.x(17)) / 5f * aspect
     private fun palmY(h: TrackedHand) = (h.y(0) + h.y(5) + h.y(9) + h.y(13) + h.y(17)) / 5f
 
@@ -236,7 +292,9 @@ class GestureEngine(private val sink: GestureSink) {
     private var lastSpreadSign = 0; private var lastSpreadEnd = 0L
     private var spreadDecided = false; private var spreadFrames = 0; private var spreadPeak = 0f
     private var lastSpreadPeak = 0f; private var spreadIgnoredRun = 0; private var spreadDecisionPeak = 0f
-    private var secondFistFrames = 0
+    private var lastStrokeEndT = 0L
+    /** Open palm held still: ms so far, and whether this hold already fired. */
+    private var palmStillMs = 0L; private var palmFired = false
     private var twoPinchSince = 0L
     private var lastCursorT = 0L
     private var lastCx = 0f; private var lastCy = 0f
@@ -244,11 +302,12 @@ class GestureEngine(private val sink: GestureSink) {
 
     private var pinching = false
     private var pinchStartT = 0L; private var pinchStartX = 0f; private var pinchStartY = 0f
+    private var pendingTapT = 0L; private var pendingTapX = 0f; private var pendingTapY = 0f
+    private var lastFistMs = 0L
     private var dragging = false
     private var twoHandDist = 0f
     private var rawPose = HandPose.None; private var rawCount = 0; private var pose = HandPose.None
     private var holdPose = HandPose.None; private var holdStart = 0L; private var holdFired = false
-    private var swipeCooldownUntil = 0L
 
     /** Last body-space (or camera-space) anchor of the primary hand, for calibration. */
     var lastAnchorB = FloatArray(2); private set
@@ -269,7 +328,10 @@ class GestureEngine(private val sink: GestureSink) {
         if (f == null || screenW <= 0f) return
         frameNowMs = nowMs
         // Ignore low-confidence detections (spurious "hands" made the cursor jump).
-        val good = f.hands.filter { it.score >= 0.6f }
+        val good = if (f.id == phantomFrame) phantomGood else {
+            phantomFrame = f.id
+            filterPhantoms(f.hands.filter { it.score >= 0.6f }, nowMs).also { phantomGood = it }
+        }
         if (nowMs - f.receivedMs > 400 || good.isEmpty()) {
             if (lastSeenHandsMs != 0L && nowMs - lastSeenHandsMs > 250) handsLost()
             if (f.id != lastFrame) { lastFrame = f.id; lastFrameId = f.id; lastFrameHands = 0; updateBody(f, nowMs) }
@@ -308,11 +370,13 @@ class GestureEngine(private val sink: GestureSink) {
         outlierFrames = 0
 
         var cx = fx.filter(primary.cursorX, dt); var cy = fy.filter(primary.cursorY, dt)
-        if (lastCursorT == 0L || hypot(cx - outX, cy - outY) > deadZonePx) {
+        // At the camera border the landmarks shake: widen the dead zone there.
+        val dz = if (primary.atEdge) deadZonePx * 4f else deadZonePx
+        if (lastCursorT == 0L || hypot(cx - outX, cy - outY) > dz) {
             // Move by the excess beyond the dead zone so motion stays continuous.
             val d = hypot(cx - outX, cy - outY)
             if (lastCursorT == 0L || d <= 0f) { outX = cx; outY = cy } else {
-                val k = (d - deadZonePx) / d
+                val k = (d - dz) / d
                 outX += (cx - outX) * k; outY += (cy - outY) * k
             }
         }
@@ -334,10 +398,25 @@ class GestureEngine(private val sink: GestureSink) {
             prevHX[i] = hv.freeX; prevHY[i] = hv.freeY; velValid[i] = true
         }
 
-        // Debounced pose: 3 consistent frames, except pinch which is immediate (hysteresis).
+        // Debounced pose: 3 consistent frames; pinch needs 2. The log showed false clicks from
+        //  - the hand at the camera border (finger landmarks shake): the pose is frozen there;
+        //  - closing into / opening out of a fist, which passes through a pinch shape;
+        //  - fast swipes, where motion blur briefly brings thumb and index together.
         val p = primary.pose
+        if (p == HandPose.Fist) lastFistMs = t
         if (p == rawPose) rawCount++ else { rawPose = p; rawCount = 1 }
-        if (p == HandPose.Pinch || rawCount >= 3) pose = p
+        val fast = hypot(handVx[0], handVy[0]) > STROKE_START
+        val pinchOk = !primary.atEdge && !fast && t - lastFistMs > 300
+        when {
+            primary.atEdge && pose != HandPose.None -> {} // keep the last trusted pose
+            p == HandPose.Pinch -> if (pose == HandPose.Pinch || (rawCount >= 2 && pinchOk)) pose = p
+            rawCount >= 3 -> pose = p
+        }
+        if (pendingTapT != 0L) {
+            // A pinch that opens into a fist or thumbs-up was a hand-shape change, not a tap.
+            if (p == HandPose.Fist || p == HandPose.ThumbsUp || primary.atEdge) pendingTapT = 0L
+            else if (t - pendingTapT >= 90) { pendingTapT = 0L; sink.onTap(pendingTapX, pendingTapY) }
+        }
 
         val now = mutableSetOf<Gesture>()
         val twoPinch = ordered.size == 2 && hands[0].pose == HandPose.Pinch && hands[1].pose == HandPose.Pinch
@@ -381,7 +460,7 @@ class GestureEngine(private val sink: GestureSink) {
                 pinching -> {
                     pinching = false
                     sink.onPress(false)
-                    if (!dragging && t - pinchStartT < 700) sink.onTap(pinchStartX, pinchStartY)
+                    if (!dragging && t - pinchStartT < 700) { pendingTapT = t; pendingTapX = pinchStartX; pendingTapY = pinchStartY }
                     dragging = false
                 }
             }
@@ -398,6 +477,7 @@ class GestureEngine(private val sink: GestureSink) {
         if (gripping) now += Gesture.Grab
 
         if (pose == HandPose.Point) now += Gesture.Point
+        if (indexTap(t, primary, cx, cy)) now += Gesture.IndexTap
         val bothVisible = hands[0].visible && hands[1].visible
         fun openish(h: HandView) = h.pose != HandPose.Fist && h.pose != HandPose.Pinch
 
@@ -405,7 +485,7 @@ class GestureEngine(private val sink: GestureSink) {
         // Log showed single-frame jumps of +121% / −205% from hand jitter: the distance is
         // smoothed, the direction must hold for 2 frames, and each step is capped.
         var twoHandZooming = false
-        if (flingClaimed && bothVisible && openish(hands[0]) && openish(hands[1])) {
+        if (bothVisible && openish(hands[0]) && openish(hands[1])) {
             val d = hypot(hands[0].rawCursorX - hands[1].rawCursorX, hands[0].rawCursorY - hands[1].rawCursorY)
             openDistSmooth = if (openDistSmooth == 0f) d else openDistSmooth + (d - openDistSmooth) * 0.45f
             if (openDist > 0f) {
@@ -447,17 +527,20 @@ class GestureEngine(private val sink: GestureSink) {
         }
 
         if (pose == HandPose.Open) now += Gesture.OpenPalm
-        if (flingClaimed) {
-            translateStrokes(t, dt, twoHandZooming)
-        } else if (pose == HandPose.Open && t > swipeCooldownUntil && vx < -2.0f * screenW && abs(vx) > 2f * abs(vy)) {
-            swipeCooldownUntil = t + 800
-            sink.onBack()
-            now += Gesture.Swipe
-        }
+        // Every screen reads swipes through the stroke translator (returns are ignored);
+        // what a swipe does is up to the screen: spin, scroll, or back / next.
+        translateStrokes(t, dt, twoHandZooming)
+        if (t - lastFlingT < 400) now += Gesture.Swipe
 
-        // The second hand making a fist also stops motion.
-        secondFistFrames = if (hands[1].visible && hands[1].pose == HandPose.Fist) secondFistFrames + 1 else 0
-        if (secondFistFrames == 3) sink.onHold()
+        // STOP: a full open palm (all five fingers) held still, like a "stop" sign. Not
+        // right after a stroke, so the hand settling after a swipe doesn't undo the spin.
+        val palmUp = primary.visible && primary.pose == HandPose.Open && primary.extended.endsWith("IMRP") &&
+            hypot(handVx[0], handVy[0]) < PALM_STILL_SPEED && !strokeActive
+        if (palmUp && t - lastStrokeEndT > 600) {
+            palmStillMs += (dt * 1000).toLong()
+            if (!palmFired && palmStillMs >= PALM_STOP_MS) { palmFired = true; sink.onHold() }
+        } else if (!palmUp) { palmStillMs = 0L; palmFired = false }
+        if (palmUp && palmStillMs > 0L) now += Gesture.Stop
 
         // Hold gestures with a visible progress ring.
         val holdTarget = when (pose) { HandPose.Victory -> HandPose.Victory; HandPose.ThumbsUp -> HandPose.ThumbsUp; else -> HandPose.None }
@@ -478,8 +561,8 @@ class GestureEngine(private val sink: GestureSink) {
         hands.forEach { it.visible = false }
         if (pinching) { pinching = false; sink.onPress(false) }
         if (gripping) { gripping = false; sink.onGrip(false) }
-        twoPinchSince = 0L; openDist = 0f; openDistSmooth = 0f; spreadSign = 0; fastFrames = 0; burstPeak = 0f; strokeActive = false; velValid[0] = false; velValid[1] = false; secondFistFrames = 0
-        dragging = false; twoHandDist = 0f; pose = HandPose.None; holdPose = HandPose.None; holdProgress = 0f
+        twoPinchSince = 0L; openDist = 0f; openDistSmooth = 0f; spreadSign = 0; fastFrames = 0; burstPeak = 0f; strokeActive = false; velValid[0] = false; velValid[1] = false; palmStillMs = 0L; palmFired = false
+        dragging = false; twoHandDist = 0f; pose = HandPose.None; pendingTapT = 0L; holdPose = HandPose.None; holdProgress = 0f
         fx.reset(); fy.reset(); lastCursorT = 0L; lastPrimaryAx = -1f; outlierFrames = 0
         if (active.isNotEmpty()) active = emptySet()
         sink.onHandsLost()
@@ -552,6 +635,12 @@ class GestureEngine(private val sink: GestureSink) {
         out.pose = pose
         out.isRight = h.isRight
         out.pinchRatio = pinchRatio
+        run {
+            val fx = px(8) - px(5); val fy = py(8) - py(5); val fz = pz(8) - pz(5)
+            val qx = px(9) - px(0); val qy = py(9) - py(0); val qz = pz(9) - pz(0)
+            val n = kotlin.math.sqrt((fx * fx + fy * fy + fz * fz) * (qx * qx + qy * qy + qz * qz)).coerceAtLeast(1e-9f)
+            out.indexBend = kotlin.math.acos(((fx * qx + fy * qy + fz * qz) / n).coerceIn(-1f, 1f)) * 180f / PI.toFloat()
+        }
         // Back-of-hand normal: (index knuckle − wrist) × (pinky knuckle − wrist). In the
         // mirrored image this points out of the back of a right hand; flip for the left.
         run {
@@ -564,6 +653,14 @@ class GestureEngine(private val sink: GestureSink) {
             out.backX = nx; out.backY = ny; out.backZ = nz
         }
         out.score = h.score
+        run {
+            var edge = false
+            for (i in 0..20) {
+                val x = h.x(i); val y = h.y(i)
+                if (x < EDGE || x > 1f - EDGE || y < EDGE || y > 1f - EDGE) { edge = true; break }
+            }
+            out.atEdge = edge
+        }
         out.extended = (if (thumbOut) "T" else "-") + (if (index) "I" else "-") + (if (middle) "M" else "-") + (if (ring) "R" else "-") + (if (pinky) "P" else "-")
 
         // Stable anchor: the palm centre. The old anchor used the thumb and index tips,
@@ -627,7 +724,6 @@ class GestureEngine(private val sink: GestureSink) {
     private var flungPeak = 0f
     private var strokeDecisionPeak = 0f
     private var strokeMinSincePeak = Float.MAX_VALUE
-    private var strokeBackX = 0f; private var strokeBackY = 0f; private var strokeBackN = 0
     // The previous meaningful stroke (swipe or ignored return) for return detection.
     private var prevX = 0f; private var prevY = 0f; private var prevPeak = 0f
     private var prevEnd = 0L; private var ignoredRun = 0
@@ -667,7 +763,6 @@ class GestureEngine(private val sink: GestureSink) {
                 strokeDx = 0f; strokeDy = 0f; strokePath = 0f; strokePeak = 0f
                 strokeFrames = 0; strokeOpen = 0; strokeDecided = false; strokeKind = ""; strokeSlowFrames = 0; flungPeak = 0f
                 strokeMinSincePeak = Float.MAX_VALUE
-                strokeBackX = 0f; strokeBackY = 0f; strokeBackN = 0
             } else return
         }
         if (hand < 0 || blocked) { endStroke(t); return }
@@ -684,12 +779,10 @@ class GestureEngine(private val sink: GestureSink) {
             strokeDx = 0f; strokeDy = 0f; strokePath = 0f; strokePeak = 0f
             strokeFrames = 0; strokeOpen = 0; strokeDecided = false; strokeKind = ""; strokeSlowFrames = 0; flungPeak = 0f
             strokeMinSincePeak = Float.MAX_VALUE
-            strokeBackX = 0f; strokeBackY = 0f; strokeBackN = 0
         }
         strokeDx += vxh * dt; strokeDy += vyh * dt; strokePath += speed * dt
-        strokeBackX += hands[hand].backX; strokeBackY += hands[hand].backY; strokeBackN++
         strokeFrames++
-        if (hands[hand].pose == HandPose.Open) strokeOpen++
+        if (hands[hand].pose != HandPose.Fist && hands[hand].pose != HandPose.Pinch) strokeOpen++
         if (speed > strokePeak) { strokePeak = speed; strokeMinSincePeak = speed } else strokeMinSincePeak = minOf(strokeMinSincePeak, speed)
 
         // Decide once there's enough of the stroke to judge (3 frames ≈ 100 ms), or as
@@ -697,18 +790,12 @@ class GestureEngine(private val sink: GestureSink) {
         if (!strokeDecided && (strokeFrames >= 3 || (strokeFrames >= 2 && speed < strokePeak * 0.6f))) {
             strokeDecided = true
             val len = hypot(strokeDx, strokeDy).coerceAtLeast(1e-3f)
-            var dirX = strokeDx / len; var dirY = strokeDy / len
+            val dirX = strokeDx / len; val dirY = strokeDy / len
             val straight = len / strokePath.coerceAtLeast(1e-3f)
             val open = strokeOpen.toFloat() / strokeFrames
-            // Back of the hand: when the hand is tilted, the back faces where the user means
-            // to swipe (the arm's arc bends the path; the hand's facing doesn't). A stroke
-            // led by the back is a swipe, one led by the palm is the hand coming back.
-            val bx = strokeBackX / strokeBackN.coerceAtLeast(1); val by = strokeBackY / strokeBackN.coerceAtLeast(1)
-            val bl = hypot(bx, by)
-            val lead = if (bl > 0.35f) (dirX * bx + dirY * by) / bl else 0f
-            val backLeads = lead > 0.3f
-            val palmLeads = lead < -0.3f
-            if (backLeads) { dirX = bx / bl; dirY = by / bl }
+            // Direction is the hand's actual motion. The back-of-hand vector was tried and the
+            // log showed it is just how the hand is tilted (it leaned left whichever way the
+            // user swiped), so it bent right/vertical swipes into ↙ and hid them as returns.
             // Return or reversal? Both look the same; the one you mean is the more forceful
             // one. An opposite stroke soon after the last one counts only if it's at least as
             // fast (compared at the same point in the stroke). Never more than two in a row
@@ -716,30 +803,29 @@ class GestureEngine(private val sink: GestureSink) {
             strokeDecisionPeak = strokePeak
             val opposite = dirX * prevX + dirY * prevY < -0.5f
             val speedSaysReturn = opposite && t - prevEnd < 900 && strokePeak < prevPeak
-            val isReturn = ignoredRun < 2 && !backLeads && (palmLeads && t - prevEnd < 1200 || speedSaysReturn)
-            val deliberate = if (backLeads) strokePeak > SWIPE_SPEED * 0.8f && straight > 0.6f
-                else strokePeak > SWIPE_SPEED && straight > 0.7f && open >= 0.5f
-            val how = if (backLeads) " · BACK-HAND" else if (palmLeads) " · PALM-LED" else ""
+            val isReturn = ignoredRun < 2 && speedSaysReturn
+            // "Open" here means not a fist or pinch: an edge-on hand often reads as Point.
+            val deliberate = strokePeak > SWIPE_SPEED && straight > 0.65f && open >= 0.5f
             val dir = arrow(dirX, dirY)
             val k = "${(strokePeak / 100).toInt() / 10f}K PX/S"
             when {
                 isReturn -> {
                     strokeKind = "return"
                     sink.onReturnIgnored("swipe")
-                    interpret(t, if (palmLeads) "RETURN $dir · IGNORED (PALM-LED: HAND COMING BACK)"
-                        else "RETURN $dir · IGNORED (SLOWER THAN ${arrow(prevX, prevY)} · SWIPE HARDER TO REVERSE)")
+                    interpret(t, "RETURN $dir · IGNORED (SLOWER THAN ${arrow(prevX, prevY)} · SWIPE HARDER TO REVERSE)")
                 }
                 deliberate -> {
                     strokeKind = "swipe"
                     flingDirX = dirX; flingDirY = dirY
                     flingFromStroke(t, dirX, dirY)
-                    interpret(t, "SWIPE $dir $k$how → SPIN")
+                    sink.onSwipe(dirX, dirY, strokePeak)
+                    interpret(t, "SWIPE $dir $k")
                 }
                 else -> {
                     strokeKind = "move"
                     val why = when {
-                        straight <= 0.7f -> "CURVED"
-                        open < 0.5f -> "HAND NOT OPEN"
+                        straight <= 0.65f -> "CURVED"
+                        open < 0.5f -> "HAND CLOSED"
                         else -> "TOO SLOW"
                     }
                     interpret(t, "MOVE $dir · NO ACTION ($why)")
@@ -763,21 +849,88 @@ class GestureEngine(private val sink: GestureSink) {
 
     private fun endStroke(t: Long) {
         if (!strokeActive) return
-        if (strokeKind == "swipe" || strokeKind == "return") {
+        if (strokeKind == "swipe") {
             val len = hypot(strokeDx, strokeDy).coerceAtLeast(1e-3f)
             prevX = strokeDx / len; prevY = strokeDy / len
             prevPeak = strokeDecisionPeak; prevEnd = t
-            ignoredRun = if (strokeKind == "return") ignoredRun + 1 else 0
+            ignoredRun = 0
+        } else if (strokeKind == "return") {
+            // Keep comparing against the swipe itself: the log showed the next swipe in the
+            // original direction being ignored as the "return of the return".
+            prevEnd = t
+            ignoredRun++
         }
-        strokeActive = false; strokeHand = -1
+        strokeActive = false; strokeHand = -1; lastStrokeEndT = t
+    }
+
+    // ---------------------------------------------------------------- index tap
+    /**
+     * Point, then dip the index finger and lift it back, like tapping a button: a click at
+     * where you pointed. The log showed the finger stays straight during a tap (it bends at
+     * the knuckle), so the pose never changed; we watch the finger's angle to the palm
+     * against its own resting angle instead.
+     */
+    private var bendRest = -1f
+    // Resting angle = the lowest bend over the last ~0.6 s of pointing. (An average chased
+    // the finger as it went down, and the log's taps went down over 3-4 frames.)
+    private val bendHist = FloatArray(18); private val bendHistT = LongArray(18); private var bendHistI = 0
+    private var tapFistFrames = 0
+    private var tapPhase = 0; private var tapDownT = 0L; private var tapCoolUntil = 0L
+    private var tapX = 0f; private var tapY = 0f; private var tapPeak = 0f
+    private val posHistX = FloatArray(4); private val posHistY = FloatArray(4); private var posHistI = 0
+
+    private fun indexTap(t: Long, h: HandView, cx: Float, cy: Float): Boolean {
+        // Where the cursor was ~3 frames ago: the dip itself nudges the hand.
+        val oldX = posHistX[posHistI]; val oldY = posHistY[posHistI]
+        posHistX[posHistI] = cx; posHistY[posHistI] = cy; posHistI = (posHistI + 1) % posHistX.size
+        val b = h.indexBend
+        val usable = h.visible && !h.atEdge && !pinching && !gripping && hypot(handVx[0], handVy[0]) < STROKE_START
+        if (!usable) { tapPhase = 0; return false }
+        when (tapPhase) {
+            0 -> {
+                if (h.pose != HandPose.Point) { bendRest = -1f; bendHistT.fill(0L); return false }
+                var rest = Float.MAX_VALUE
+                for (k in bendHist.indices) if (bendHistT[k] != 0L && t - bendHistT[k] <= 600) rest = minOf(rest, bendHist[k])
+                bendHist[bendHistI] = b; bendHistT[bendHistI] = t; bendHistI = (bendHistI + 1) % bendHist.size
+                if (rest == Float.MAX_VALUE) return false
+                bendRest = rest
+                if (b - rest > TAP_DIP_DEG && t >= tapCoolUntil) {
+                    tapPhase = 1; tapDownT = t; tapPeak = b; tapFistFrames = 0
+                    tapX = if (oldX != 0f) oldX else cx; tapY = if (oldY != 0f) oldY else cy
+                    return true
+                }
+            }
+            1 -> {
+                tapPeak = maxOf(tapPeak, b)
+                when {
+                    // Held this long: the log's taps were held ~0.5 s; longer is curling into a fist.
+                    t - tapDownT > 1000 -> tapPhase = 0
+                    // Opening into a palm or pinching is a shape change, not a tap; a fist for
+                    // more than a few frames is the hand closing.
+                    h.pose != HandPose.Point && h.pose != HandPose.Fist -> tapPhase = 0
+                    h.pose == HandPose.Fist && ++tapFistFrames > 4 -> tapPhase = 0
+                    h.pose == HandPose.Point && b - bendRest < TAP_DIP_DEG * 0.45f && t - tapDownT >= 50 -> {
+                        tapPhase = 0; tapCoolUntil = t + 250; bendHistT.fill(0L)
+                        interpret(t, "INDEX TAP · DIP ${(tapPeak - bendRest).toInt()}°")
+                        sink.onTap(tapX, tapY)
+                    }
+                }
+                return true
+            }
+        }
+        return false
     }
 
     private fun endSpread(t: Long) {
         // One ignored return per zoom stroke: after it, the opposite direction is
         // deliberate (previously each ignore extended the block and zoom got stuck).
-        if (spreadDecided) {
+        if (spreadDecided && !spreadEpisodeIgnored) {
             lastSpreadSign = spreadEpisode; lastSpreadPeak = spreadDecisionPeak
-            spreadIgnoredRun = if (spreadEpisodeIgnored) spreadIgnoredRun + 1 else 0
+            spreadIgnoredRun = 0
+        } else if (spreadDecided) {
+            // Keep comparing with the real zoom (log: the next zoom-in after an ignored
+            // "together" was itself ignored as the return of the return).
+            spreadIgnoredRun++
         }
         lastSpreadEnd = t
         spreadDecided = false

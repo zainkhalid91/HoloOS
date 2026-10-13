@@ -51,15 +51,17 @@ uniform float2 texSize;
 half4 main(float2 fc) {
     float PI = 3.14159265;
     float2 d = (fc - center) / radius;
-    float r2 = dot(d, d);
-    if (r2 > 1.0) {
-        float g = clamp(1.0 - (sqrt(r2) - 1.0) / 0.13, 0.0, 1.0);
+    // Not "r2": that name is the third matrix row uniform. Shadowing it made the depth
+    // term a scalar, so the map collapsed into a black hole at the globe's centre.
+    float dd = dot(d, d);
+    if (dd > 1.0) {
+        float g = clamp(1.0 - (sqrt(dd) - 1.0) / 0.13, 0.0, 1.0);
         g = g * g * g * 0.6;
         return half4(half3(0.30, 0.62, 1.0) * g, g);
     }
-    float z = sqrt(1.0 - r2);
+    float z = sqrt(1.0 - dd);
     // Screen normal back to world: the matrix is orthonormal, so the inverse is its transpose.
-    float3 w = r0 * d.x + r1 * d.y + r2 * z;
+    float3 w = normalize(r0 * d.x + r1 * d.y + r2 * z);
     float wx = w.x; float wy = w.y; float wz = w.z;
     float lat = asin(clamp(-wy, -1.0, 1.0));
     float lon = atan(wx, wz);

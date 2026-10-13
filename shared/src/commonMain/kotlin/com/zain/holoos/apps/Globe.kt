@@ -228,7 +228,7 @@ fun GlobeView() {
             cam.angY = vx / r * 0.45f
             cam.angX = (if (holo.invertVertical) -vy else vy) / r * 0.45f
         }
-        // A fist stops it right there.
+        // A full palm held still stops it right there (a fist grabs and turns it).
         holo.screenHold = {
             if (abs(cam.angY) > 0.01f || abs(cam.angX) > 0.01f || cam.flying) holo.sfx(Sfx.KeyOp, pitch = 0.7f)
             cam.angY = 0f; cam.angX = 0f; cam.flying = false; cam.autoSpin = false
